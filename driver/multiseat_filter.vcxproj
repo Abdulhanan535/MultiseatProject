@@ -15,7 +15,7 @@
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
-    <TargetVersion>Windows11</TargetVersion>
+    <TargetVersion>Windows10</TargetVersion>
     <KmdfVersionNumber>1.33</KmdfVersionNumber>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
