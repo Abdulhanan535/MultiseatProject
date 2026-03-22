@@ -90,73 +90,10 @@ jobs:
         $wdkRoot = "C:\Program Files (x86)\Windows Kits\10"
         if (Test-Path $wdkRoot) {
           Write-Host "WDK found at: $wdkRoot"
-          Get-ChildItem "$wdkRoot\Include" | Select-Object Name
         } else {
           Write-Error "WDK not found!"
           exit 1
         }
-        # Check WDK VS extension targets exist
-        $targetsPath = "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.Common.targets"
-        if (Test-Path $targetsPath) {
-          Write-Host "WDK VS targets found."
-        } else {
-          Write-Warning "WDK VS targets not found - driver build may fail"
-          # List what build targets are available
-          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\build\" -ErrorAction SilentlyContinue
-        }
-
-    - name: Generate driver .vcxproj
-      shell: powershell
-      run: |
-        $proj = @"
-<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Release|x64">
-      <Configuration>Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-  </ItemGroup>
-  <PropertyGroup Label="Globals">
-    <ProjectGuid>{11111111-1111-1111-1111-111111111111}</ProjectGuid>
-    <RootNamespace>multiseat_filter</RootNamespace>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
-  </PropertyGroup>
-  <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Label="Configuration">
-    <ConfigurationType>Driver</ConfigurationType>
-    <DriverType>KMDF</DriverType>
-    <TargetVersion>Windows11</TargetVersion>
-    <KmdfVersionNumber>1.33</KmdfVersionNumber>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
-  <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <ImportGroup Label="ExtensionSettings" />
-  <PropertyGroup Label="UserMacros" />
-  <ItemDefinitionGroup>
-    <ClCompile>
-      <AdditionalIncludeDirectories>`$(ProjectDir)..\shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <WarningLevel>Level4</WarningLevel>
-      <Optimization>MaxSpeed</Optimization>
-    </ClCompile>
-    <Link>
-      <SubSystem>Native</SubSystem>
-    </Link>
-  </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="multiseat_filter.c" />
-  </ItemGroup>
-  <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets">
-    <Import Project="`$(WDKContentRoot)build\WindowsDriver.Common.targets" />
-  </ImportGroup>
-</Project>
-"@
-        $proj | Out-File -FilePath "driver\multiseat_filter.vcxproj" -Encoding utf8
-        Write-Host "vcxproj generated"
 
     - name: Build kernel driver
       shell: powershell
