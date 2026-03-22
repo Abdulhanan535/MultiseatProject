@@ -381,7 +381,8 @@ BOOL SessionManager_CreateSeat(
         printf("[SessionMgr] Using RDP loopback for session creation\n");
         CloseHandle(hToken);  // done with this, RDP will handle logon
 
-        // Enable RDP
+        // Enable RDP and disable NLA (Network Level Authentication)
+        // NLA causes "The handle is invalid" with loopback + cmdkey credentials
         HKEY hKey;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                 L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server",
@@ -391,6 +392,15 @@ BOOL SessionManager_CreateSeat(
             val = 0;
             RegSetValueExW(hKey, L"fSingleSessionPerUser", 0, REG_DWORD, (BYTE*)&val, 4);
             RegCloseKey(hKey);
+        }
+        // Disable NLA on RDP listener
+        HKEY hWinSta;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp",
+                0, KEY_SET_VALUE, &hWinSta) == ERROR_SUCCESS) {
+            DWORD val = 0;
+            RegSetValueExW(hWinSta, L"UserAuthentication", 0, REG_DWORD, (BYTE*)&val, 4);
+            RegCloseKey(hWinSta);
         }
 
         // Save credentials for silent login
