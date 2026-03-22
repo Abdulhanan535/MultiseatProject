@@ -209,6 +209,7 @@ static VOID RouteInput(DEVICE_CTX* Ctx, PVOID Report, SIZE_T ReportLen)
              Ctx->SeatIndex, targetSession, ReportLen));
     // In full build: write to shared ring buffer here
     UNREFERENCED_PARAMETER(Report);
+    UNREFERENCED_PARAMETER(ReportLen);
 }
 
 // ================================================================
