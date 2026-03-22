@@ -5,7 +5,7 @@
 static MONITOR_INFO g_Mons[MAX_MONS];
 static ULONG        g_MonCount = 0;
 static BOOL CALLBACK EnumProc(HMONITOR h, HDC dc, LPRECT r, LPARAM lp) {
-    UNREFERENCED_PARAMETER(dc); UNREFERENCED_PARAMETER(lp);
+    UNREFERENCED_PARAMETER(dc); UNREFERENCED_PARAMETER(lp); UNREFERENCED_PARAMETER(r);
     if (g_MonCount >= MAX_MONS) return FALSE;
     MONITORINFOEXW mi = { sizeof(mi) };
     GetMonitorInfoW(h, (LPMONITORINFO)&mi);

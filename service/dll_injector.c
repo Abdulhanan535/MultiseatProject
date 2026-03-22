@@ -162,7 +162,6 @@ static DWORD WINAPI WatchThread(LPVOID param)
 
     IWbemLocator*  pLoc  = NULL;
     IWbemServices* pSvc  = NULL;
-    IWbemObjectSink* pSink = NULL; // simplified — use polling instead
 
     HRESULT hr = CoCreateInstance(
         &CLSID_WbemLocator, NULL,
@@ -251,8 +250,9 @@ BOOL DllInjector_SetupIFEO(LPCWSTR exeName)
     RegSetValueExW(hKey, L"VerifierDlls", 0, REG_SZ,
                    (BYTE*)g_DllPath,
                    (DWORD)((wcslen(g_DllPath) + 1) * sizeof(WCHAR)));
+    DWORD globalFlag = 0x100;
     RegSetValueExW(hKey, L"GlobalFlag", 0, REG_DWORD,
-                   (BYTE*)&(DWORD){0x100}, 4);  // FLG_APPLICATION_VERIFIER
+                   (BYTE*)&globalFlag, sizeof(globalFlag));  // FLG_APPLICATION_VERIFIER
 
     RegCloseKey(hKey);
     printf("[Injector] IFEO registered for %ws\n", exeName);

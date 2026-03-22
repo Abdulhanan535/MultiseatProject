@@ -107,7 +107,7 @@ static VOID SetSvcStatus(DWORD state)
     g_Svc.dwControlsAccepted = (state == SERVICE_RUNNING) ? SERVICE_ACCEPT_STOP : 0;
     g_Svc.dwWin32ExitCode    = NO_ERROR;
     g_Svc.dwWaitHint         = 3000;
-    ::SetServiceStatus(g_SvcHandle, &g_Svc);
+    SetServiceStatus(g_SvcHandle, &g_Svc);
 }
 
 static BOOL Install(void)
