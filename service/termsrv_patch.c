@@ -34,15 +34,18 @@
 #include <stdio.h>
 #include "termsrv_patch.h"
 
-// ── Byte patterns (works on Win11 22H2 / 23H2) ──────────────────
+// -- Byte patterns for Win11 22H2/23H2 (termsrv.dll 10.0.22621.x) --
 
-// Pattern 1: ConcurrentSessions cap
-// Matches:  cmp  [something], 1   ; only 1 session allowed
-//           jle  <reject>
-// We replace the immediate '1' with 0x2C (44 sessions)
-static const BYTE PAT_CONCURRENT[]   = { 0x39, 0x87, 0xCC, 0x00, 0x00, 0x00 };
-static const BYTE MASK_CONCURRENT[]  = { 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 };
-static const BYTE PATCH_CONCURRENT[] = { 0x39, 0x87, 0x2C, 0x00, 0x00, 0x00 };
+// Pattern 1: Concurrent session cap
+//   cmp  dword ptr [rcx+63Ch], eax
+//   jz   <block session>
+// Replace with:
+//   mov  eax, 100h       (allow 256 sessions)
+//   mov  [rcx+638h], eax
+//   nop
+static const BYTE PAT_CONCURRENT[]   = { 0x39, 0x81, 0x3C, 0x06, 0x00, 0x00, 0x0F, 0x84, 0x00, 0x00, 0x00, 0x00 };
+static const BYTE MASK_CONCURRENT[]  = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 };
+static const BYTE PATCH_CONCURRENT[] = { 0xB8, 0x00, 0x01, 0x00, 0x00, 0x89, 0x81, 0x38, 0x06, 0x00, 0x00, 0x90 };
 
 // Pattern 2: Per-user single-session enforcement
 // Matches:  test eax,eax  /  jz short <disconnect existing>

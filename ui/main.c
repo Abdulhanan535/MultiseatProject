@@ -467,6 +467,7 @@ static void OnStart(void) {
 
 static void OnStop(void) {
     SessionManager_TerminateSeat(1);
+    EnableWindow(GetDlgItem(g_Panels[2],IDC_BTN_START),TRUE);
     SetStatus(L"Seat 2 stopped.");
 }
 

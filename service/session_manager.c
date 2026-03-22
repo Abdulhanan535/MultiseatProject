@@ -420,9 +420,10 @@ static BOOL EnsureLocalUser(LPCWSTR username, LPCWSTR password)
     if (status == NERR_Success) {
         printf("[SessionMgr] Created local account [%ws]\n", username);
 
-        // Add to "Users" local group
+        // Add to "Users" and "Remote Desktop Users" local groups
         LOCALGROUP_MEMBERS_INFO_3 member = { (LPWSTR)username };
         NetLocalGroupAddMembers(NULL, L"Users", 3, (LPBYTE)&member, 1);
+        NetLocalGroupAddMembers(NULL, L"Remote Desktop Users", 3, (LPBYTE)&member, 1);
         return TRUE;
     }
     if (status == NERR_UserExists) {
