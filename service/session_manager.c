@@ -414,7 +414,7 @@ BOOL SessionManager_CreateSeat(
             L"mstsc /v:127.0.0.2 /w:800 /h:600");
         STARTUPINFOW si2 = { sizeof(si2) };
         si2.dwFlags = STARTF_USESHOWWINDOW;
-        si2.wShowWindow = SW_MINIMIZE;
+        si2.wShowWindow = SW_SHOW;  // visible for testing
         PROCESS_INFORMATION pi2 = { 0 };
         if (!CreateProcessW(NULL, mstsc, NULL, NULL, FALSE,
                 0, NULL, NULL, &si2, &pi2)) {
@@ -438,11 +438,9 @@ BOOL SessionManager_CreateSeat(
         }
     }
 
-    // Kill mstsc now that the session is established (session stays alive)
+    // DEBUG: Don't kill mstsc for now (testing)
     if (hMstsc) {
-        TerminateProcess(hMstsc, 0);
         CloseHandle(hMstsc);
-        printf("[SessionMgr] mstsc terminated (session persists)\n");
     }
 
     if (newSessionId == (DWORD)-1) {
