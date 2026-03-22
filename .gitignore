@@ -24,3 +24,6 @@ sign_driver.ps1
 sign_catalog.ps1
 screen.png
 .gitignore
+query
+run_sys.bat
+test_logon.ps1
