@@ -16,6 +16,7 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <TargetVersion>Windows10</TargetVersion>
+    <SignMode>Off</SignMode>
     <KmdfVersionNumber>1.33</KmdfVersionNumber>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
