@@ -1,0 +1,198 @@
+name: Build MultiseatProject
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:   # lets you click "Run workflow" manually
+
+jobs:
+  build:
+    runs-on: windows-2022   # Windows Server 2022 with VS 2022 pre-installed
+
+    steps:
+    # ── 1. Checkout code ─────────────────────────────────────
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # ── 2. Install WDK 11 ───────────────────────────────────
+    #  The runner has VS 2022 but not WDK.  We download the
+    #  WDK installer silently.
+    - name: Install Windows Driver Kit 11
+      shell: powershell
+      run: |
+        Write-Host "Downloading WDK..."
+        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
+        $wdkInstaller = "$env:TEMP\wdksetup.exe"
+        Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
+        Write-Host "Installing WDK silently..."
+        Start-Process -FilePath $wdkInstaller `
+          -ArgumentList "/quiet /norestart" `
+          -Wait -NoNewWindow
+        Write-Host "WDK installation complete."
+
+    # ── 3. Build the mutex hook DLL ──────────────────────────
+    - name: Build mutex hook DLL
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cd service\mutex_hook
+        cl /LD /W4 /O2 /nologo mutex_hook.c ^
+           /link /DLL /OUT:multiseat_mutex_hook.dll kernel32.lib
+        if %errorlevel% neq 0 exit /b %errorlevel%
+        echo mutex hook DLL built OK
+
+    # ── 4. Build the service EXE ─────────────────────────────
+    - name: Build service
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cd service
+        cl /W4 /O2 /nologo ^
+          main.c session_manager.c device_manager.c ^
+          display_manager.c dll_injector.c termsrv_patch.c ^
+          /link advapi32.lib wtsapi32.lib netapi32.lib ^
+          setupapi.lib hid.lib userenv.lib shlwapi.lib ^
+          ole32.lib oleaut32.lib wbemuuid.lib ^
+          /OUT:MultiseatSvc.exe /SUBSYSTEM:CONSOLE
+        if %errorlevel% neq 0 exit /b %errorlevel%
+        echo service built OK
+
+    # ── 5. Build the control panel EXE ──────────────────────
+    - name: Build control panel UI
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        copy service\device_manager.h ui\
+        copy service\display_manager.h ui\
+        copy service\session_manager.h ui\
+        copy service\dll_injector.h ui\
+        cd ui
+        cl /W4 /O2 /nologo main.c ^
+          ..\service\device_manager.c ^
+          ..\service\display_manager.c ^
+          ..\service\session_manager.c ^
+          ..\service\dll_injector.c ^
+          ..\service\termsrv_patch.c ^
+          /link user32.lib gdi32.lib comctl32.lib wtsapi32.lib ^
+          advapi32.lib setupapi.lib hid.lib shlwapi.lib ^
+          netapi32.lib userenv.lib ole32.lib oleaut32.lib wbemuuid.lib ^
+          /OUT:MultiseatCtrlPanel.exe /SUBSYSTEM:WINDOWS
+        if %errorlevel% neq 0 exit /b %errorlevel%
+        echo control panel built OK
+
+    # ── 6. Build the kernel driver ───────────────────────────
+    #  We use MSBuild with a minimal .vcxproj generated on the fly.
+    - name: Generate driver .vcxproj
+      shell: powershell
+      run: |
+        $proj = @"
+        <?xml version="1.0" encoding="utf-8"?>
+        <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <ItemGroup Label="ProjectConfigurations">
+            <ProjectConfiguration Include="Release|x64">
+              <Configuration>Release</Configuration>
+              <Platform>x64</Platform>
+            </ProjectConfiguration>
+          </ItemGroup>
+          <PropertyGroup Label="Globals">
+            <ProjectGuid>{11111111-1111-1111-1111-111111111111}</ProjectGuid>
+            <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+            <RootNamespace>multiseat_filter</RootNamespace>
+          </PropertyGroup>
+          <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+          <PropertyGroup Label="Configuration">
+            <ConfigurationType>Driver</ConfigurationType>
+            <DriverType>KMDF</DriverType>
+            <TargetVersion>Windows11</TargetVersion>
+            <KmdfVersionNumber>1.33</KmdfVersionNumber>
+            <UseDebugLibraries>false</UseDebugLibraries>
+            <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+          </PropertyGroup>
+          <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.props" />
+          <ItemGroup>
+            <ClCompile Include="driver\multiseat_filter.c" />
+          </ItemGroup>
+          <ItemGroup>
+            <AdditionalIncludeDirectories>shared</AdditionalIncludeDirectories>
+          </ItemGroup>
+          <Import Project="`$(VCTargetsPath)\Microsoft.Cpp.targets" />
+          <ImportGroup Label="ExtensionTargets">
+            <Import Project="`$(WDKContentRoot)build\WindowsDriver.Common.targets" />
+          </ImportGroup>
+        </Project>
+        "@
+        $proj | Out-File -FilePath "driver\multiseat_filter.vcxproj" -Encoding utf8
+        Write-Host "vcxproj generated"
+
+    - name: Build kernel driver
+      shell: cmd
+      run: |
+        set WDKContentRoot=C:\Program Files (x86)\Windows Kits\10\
+        msbuild driver\multiseat_filter.vcxproj ^
+          /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+        if %errorlevel% neq 0 (
+          echo Driver build failed - check WDK installation
+          exit /b %errorlevel%
+        )
+        echo kernel driver built OK
+
+    # ── 7. Test-sign the driver ──────────────────────────────
+    - name: Create test certificate and sign driver
+      shell: powershell
+      run: |
+        # Create a self-signed test cert (dev only — real release needs EV cert)
+        $cert = New-SelfSignedCertificate `
+          -Subject "CN=MultiseatProject Test" `
+          -CertStoreLocation "Cert:\CurrentUser\My" `
+          -KeyUsage DigitalSignature `
+          -Type CodeSigningCert
+        $thumbprint = $cert.Thumbprint
+        Write-Host "Certificate thumbprint: $thumbprint"
+
+        # Find signtool
+        $signtool = Get-ChildItem `
+          "C:\Program Files (x86)\Windows Kits\10\bin" `
+          -Recurse -Filter "signtool.exe" |
+          Where-Object { $_.FullName -match "x64" } |
+          Select-Object -First 1 -ExpandProperty FullName
+
+        # Sign the .sys file
+        $sysPath = Get-ChildItem -Recurse -Filter "multiseat_filter.sys" |
+                   Select-Object -First 1 -ExpandProperty FullName
+        if ($sysPath) {
+          & $signtool sign /fd SHA256 /sha1 $thumbprint $sysPath
+          Write-Host "Driver signed: $sysPath"
+        } else {
+          Write-Warning "multiseat_filter.sys not found, skipping sign"
+        }
+
+    # ── 8. Collect all outputs ───────────────────────────────
+    - name: Collect build artifacts
+      shell: powershell
+      run: |
+        New-Item -ItemType Directory -Force -Path "artifacts"
+
+        # Service
+        Copy-Item "service\MultiseatSvc.exe"              "artifacts\" -ErrorAction SilentlyContinue
+        # Hook DLL
+        Copy-Item "service\mutex_hook\multiseat_mutex_hook.dll" "artifacts\" -ErrorAction SilentlyContinue
+        # UI
+        Copy-Item "ui\MultiseatCtrlPanel.exe"             "artifacts\" -ErrorAction SilentlyContinue
+        # Driver + INF
+        Get-ChildItem -Recurse -Filter "multiseat_filter.sys" |
+          Copy-Item -Destination "artifacts\" -ErrorAction SilentlyContinue
+        Copy-Item "driver\multiseat_filter.inf"           "artifacts\" -ErrorAction SilentlyContinue
+        # README
+        Copy-Item "README.md"                             "artifacts\" -ErrorAction SilentlyContinue
+
+        Write-Host "--- Artifacts ---"
+        Get-ChildItem "artifacts"
+
+    # ── 9. Upload as downloadable artifact ──────────────────
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: MultiseatProject-build
+        path: artifacts/
+        retention-days: 30

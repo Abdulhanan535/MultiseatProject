@@ -1,0 +1,20 @@
+# Build outputs
+*.obj
+*.pdb
+*.exp
+*.lib
+*.ilk
+*.tlog
+x64/
+Debug/
+Release/
+artifacts/
+
+# VS files
+.vs/
+*.vcxproj.user
+*.suo
+*.user
+
+# Temp
+*.tmp
