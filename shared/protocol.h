@@ -5,6 +5,18 @@
 //  Shared between the kernel filter driver and usermode service.
 // ================================================================
 
+// In kernel mode, BOOL (from windef.h) is not available.
+// Map it to BOOLEAN so this header works in both environments.
+#ifdef _KERNEL_MODE
+  typedef BOOLEAN BOOL;
+  #ifndef TRUE
+    #define TRUE  ((BOOLEAN)1)
+  #endif
+  #ifndef FALSE
+    #define FALSE ((BOOLEAN)0)
+  #endif
+#endif
+
 #define MULTISEAT_DEVICE_NAME    L"\\Device\\MultiseatFilter"
 #define MULTISEAT_DOS_NAME       L"\\DosDevices\\MultiseatFilter"
 #define MULTISEAT_WIN32_NAME     L"\\\\.\\MultiseatFilter"

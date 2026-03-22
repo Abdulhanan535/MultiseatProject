@@ -12,13 +12,14 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <hidport.h>
+#include <ntstrsafe.h>
 #include "../shared/protocol.h"
 
 // ── Per-device context ───────────────────────────────────────────
 typedef struct _DEVICE_CTX {
     WCHAR   DeviceId[MAX_DEVICE_ID_LEN];
     ULONG   SeatIndex;   // 0xFF = unassigned
-    BOOL    IsKeyboard;
+    BOOLEAN IsKeyboard;
 } DEVICE_CTX;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CTX, GetDevCtx)
 
