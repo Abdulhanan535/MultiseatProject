@@ -29,7 +29,15 @@
 #include <stdio.h>
 #include "session_manager.h"
 #include "termsrv_patch.h"
-#include "../shared/protocol.h"
+
+// Inline from removed shared/protocol.h
+#define MAX_SEATS  4
+typedef struct _SEAT_INFO {
+    ULONG  SeatIndex;
+    ULONG  SessionId;
+    WCHAR  MonitorDevice[64];
+    BOOL   Active;
+} SEAT_INFO;
 
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(lib, "userenv.lib")
@@ -147,7 +155,8 @@ BOOL SessionManager_CreateSeat(
                existingSession, username);
         g_Seats[seatIndex].SessionId = existingSession;
         g_Seats[seatIndex].Active    = TRUE;
-        goto attach_display;
+        printf("[SessionMgr] Seat %lu ready -> session %lu\n", seatIndex, existingSession);
+        return TRUE;
     }
 
     // ── 3. Log the user on to create a new session ───────────────
