@@ -16,8 +16,7 @@
 #include <stdio.h>
 #include "../service/device_manager.h"
 #include "../service/display_manager.h"
-#include "../service/session_manager.h"
-#include "../service/dll_injector.h"
+#include "../shared/pipe_protocol.h"
 
 // ── IDs ──────────────────────────────────────────────────────────
 #define IDC_TAB              10
@@ -118,20 +117,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE: {
         CreateAllPanels(hwnd);
         CreateDirectoryW(L"C:\\ProgramData\\MultiseatProject", NULL);
-        SessionManager_Init();
         DeviceManager_Enumerate();
         DisplayManager_Enumerate();
         DeviceManager_LoadConfig(L"C:\\ProgramData\\MultiseatProject\\config.json");
-        {
-            WCHAR dllPath[MAX_PATH];
-            GetModuleFileNameW(NULL,dllPath,MAX_PATH);
-            WCHAR* last=wcsrchr(dllPath,L'\\');
-            if(last) wcscpy_s(last+1,MAX_PATH-(last-dllPath+1),L"multiseat_mutex_hook.dll");
-            DllInjector_Init(dllPath);
-        }
         RefreshDevices();
         RefreshMonitors();
-        SetStatus(L"Ready. Assign devices and monitors, then click Start Seat 2.");
+        SetStatus(L"Ready. Assign devices and monitors, then start the service and click Start Seat 2.");
         return 0;
     }
 
@@ -432,11 +423,27 @@ static void OnAssignMonitor(void) {
     SetStatus(L"Monitor assigned.");
 }
 
+// ── Pipe client helper ───────────────────────────────────────────
+static BOOL SendPipeCommand(PIPE_REQUEST* req, PIPE_RESPONSE* resp) {
+    HANDLE hPipe = CreateFileW(MULTISEAT_PIPE_NAME, GENERIC_READ|GENERIC_WRITE,
+        0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hPipe == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD mode = PIPE_READMODE_MESSAGE;
+    SetNamedPipeHandleState(hPipe, &mode, NULL, NULL);
+    DWORD bw = 0;
+    WriteFile(hPipe, req, sizeof(*req), &bw, NULL);
+    DWORD br = 0;
+    ReadFile(hPipe, resp, sizeof(*resp), &br, NULL);
+    CloseHandle(hPipe);
+    return (br == sizeof(*resp));
+}
+
 static DWORD WINAPI StartThread(LPVOID p) {
     HWND hwnd = (HWND)p;
     WCHAR user[64], pass[64], mon[64];
     GetDlgItemTextW(g_Panels[2],IDC_EDIT_USER,user,64);
     GetDlgItemTextW(g_Panels[2],IDC_EDIT_PASS,pass,64);
+
     // Get monitor assigned to seat 1
     ULONG n; MONITOR_INFO* mons = DisplayManager_GetMonitors(&n);
     wcscpy_s(mon,64,L"\\\\.\\DISPLAY2");
@@ -445,13 +452,29 @@ static DWORD WINAPI StartThread(LPVOID p) {
     // Save config
     DeviceManager_SaveConfig(L"C:\\ProgramData\\MultiseatProject\\config.json");
 
-    BOOL ok = SessionManager_CreateSeat(1,user,pass,mon);
-    if (ok) {
-        // Inject mutex hook into the new session
-        ULONG sid = SessionManager_GetSessionId(1);
-        DllInjector_InjectSession(sid);
-        DllInjector_WatchSession(sid);
+    // Send command to service via named pipe
+    PIPE_REQUEST req = { 0 };
+    req.Command = PIPE_CMD_START_SEAT;
+    req.SeatIndex = 1;
+    wcscpy_s(req.Username, 64, user);
+    wcscpy_s(req.Password, 64, pass);
+    wcscpy_s(req.MonitorDevice, 64, mon);
+
+    PIPE_RESPONSE resp = { 0 };
+    BOOL connected = SendPipeCommand(&req, &resp);
+    BOOL ok = connected && resp.Success;
+
+    if (!connected) {
+        // Service not running — show error
+        MessageBoxW(hwnd,
+            L"Cannot connect to MultiseatSvc service.\n\n"
+            L"Please run:\n"
+            L"  MultiseatSvc.exe --install\n"
+            L"  sc start MultiseatSvc\n\n"
+            L"Then try again.",
+            L"Service Not Running", MB_ICONERROR | MB_TOPMOST);
     }
+
     PostMessageW(hwnd, WM_SESSION_RESULT, ok, 0);
     return 0;
 }
@@ -466,26 +489,47 @@ static void OnStart(void) {
 }
 
 static void OnStop(void) {
-    SessionManager_TerminateSeat(1);
+    PIPE_REQUEST req = { 0 };
+    req.Command = PIPE_CMD_STOP_SEAT;
+    req.SeatIndex = 1;
+    PIPE_RESPONSE resp = { 0 };
+    SendPipeCommand(&req, &resp);
     EnableWindow(GetDlgItem(g_Panels[2],IDC_BTN_START),TRUE);
-    SetStatus(L"Seat 2 stopped.");
+    SetStatus(resp.Success ? L"Seat 2 stopped." : L"Failed to stop (service not running?).");
 }
 
 static void OnAddGame(void) {
     WCHAR exe[128];
     GetDlgItemTextW(g_Panels[3],IDC_EDIT_GAME_EXE,exe,128);
     if(!exe[0]) return;
+
+    // Build DLL path (same dir as this exe)
     WCHAR dllPath[MAX_PATH];
     GetModuleFileNameW(NULL,dllPath,MAX_PATH);
     WCHAR* last=wcsrchr(dllPath,L'\\');
     if(last) wcscpy_s(last+1,MAX_PATH-(last-dllPath+1),L"multiseat_mutex_hook.dll");
-    DllInjector_Init(dllPath);
-    if(DllInjector_SetupIFEO(exe)) {
+
+    // Register in IFEO so Windows loads our hook DLL for this game
+    WCHAR keyPath[512];
+    swprintf_s(keyPath, _countof(keyPath),
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\"
+        L"Image File Execution Options\\%ws", exe);
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, NULL,
+            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"VerifierDlls", 0, REG_SZ,
+            (BYTE*)dllPath, (DWORD)((wcslen(dllPath)+1)*sizeof(WCHAR)));
+        DWORD globalFlag = 0x100;
+        RegSetValueExW(hKey, L"GlobalFlag", 0, REG_DWORD, (BYTE*)&globalFlag, sizeof(globalFlag));
+        RegCloseKey(hKey);
+
         HWND hLV = GetDlgItem(g_Panels[3],IDC_LIST_GAMES);
         LVITEMW item={LVIF_TEXT}; item.iItem=ListView_GetItemCount(hLV);
         item.pszText=exe; ListView_InsertItem(hLV,&item);
         LV_SetText(hLV,item.iItem,1,L"Hook registered");
         SetStatus(L"Game added. Seat 2 can now run its own instance.");
+    } else {
+        SetStatus(L"Failed to register game. Run as Administrator.");
     }
 }
 
@@ -494,7 +538,13 @@ static void OnRemoveGame(void) {
     int sel = ListView_GetNextItem(hLV,-1,LVNI_SELECTED);
     if(sel<0) return;
     WCHAR exe[128]; ListView_GetItemText(hLV,sel,0,exe,128);
-    DllInjector_RemoveIFEO(exe);
+
+    WCHAR keyPath[512];
+    swprintf_s(keyPath, _countof(keyPath),
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\"
+        L"Image File Execution Options\\%ws", exe);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, keyPath);
+
     ListView_DeleteItem(hLV,sel);
     SetStatus(L"Game removed from hook list.");
 }

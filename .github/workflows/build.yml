@@ -81,20 +81,13 @@ jobs:
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        copy service\device_manager.h ui\
-        copy service\display_manager.h ui\
-        copy service\session_manager.h ui\
-        copy service\dll_injector.h ui\
         cd ui
         cl /W4 /O2 /nologo /D UNICODE /D _UNICODE main.c ^
           ..\service\device_manager.c ^
           ..\service\display_manager.c ^
-          ..\service\session_manager.c ^
-          ..\service\dll_injector.c ^
-          ..\service\termsrv_patch.c ^
+          /I ..\shared /I ..\service ^
           /link user32.lib gdi32.lib comctl32.lib wtsapi32.lib ^
           advapi32.lib setupapi.lib hid.lib shlwapi.lib ^
-          netapi32.lib userenv.lib ole32.lib oleaut32.lib wbemuuid.lib ^
           /OUT:MultiseatCtrlPanel.exe /SUBSYSTEM:WINDOWS
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo control panel built OK

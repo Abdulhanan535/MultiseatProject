@@ -10,6 +10,7 @@
 #include "display_manager.h"
 #include "dll_injector.h"
 #include "termsrv_patch.h"
+#include "../shared/pipe_protocol.h"
 
 #define SERVICE_NAME     L"MultiseatSvc"
 #define CONFIG_PATH      L"C:\\ProgramData\\MultiseatProject\\config.json"
@@ -26,6 +27,7 @@ static VOID        SetSvcStatus(DWORD state);
 static BOOL        Install(void);
 static BOOL        Uninstall(void);
 static WCHAR*      GetHookDllPath(void);
+static DWORD WINAPI PipeServerThread(LPVOID param);
 
 int wmain(int argc, wchar_t* argv[])
 {
@@ -83,8 +85,15 @@ static VOID RunLogic(void)
     SetSvcStatus(SERVICE_RUNNING);
     printf("[Main] Service ready.\n");
 
+    // Launch pipe server to receive commands from the UI
+    HANDLE hPipeThread = CreateThread(NULL, 0, PipeServerThread, NULL, 0, NULL);
+
     WaitForSingleObject(g_StopEvent, INFINITE);
 
+    if (hPipeThread) {
+        TerminateThread(hPipeThread, 0);
+        CloseHandle(hPipeThread);
+    }
     SessionManager_Shutdown();
     printf("[Main] Service stopped.\n");
 }
@@ -141,4 +150,87 @@ static BOOL Uninstall(void)
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
     return ok;
+}
+
+// ================================================================
+//  PipeServerThread
+//  Listens for commands from the Control Panel UI over a named pipe.
+// ================================================================
+static DWORD WINAPI PipeServerThread(LPVOID param)
+{
+    UNREFERENCED_PARAMETER(param);
+    printf("[Pipe] Server started on %ws\n", MULTISEAT_PIPE_NAME);
+
+    while (TRUE) {
+        HANDLE hPipe = CreateNamedPipeW(
+            MULTISEAT_PIPE_NAME,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            sizeof(PIPE_RESPONSE), sizeof(PIPE_REQUEST),
+            0, NULL);
+
+        if (hPipe == INVALID_HANDLE_VALUE) {
+            printf("[Pipe] CreateNamedPipe failed: %lu\n", GetLastError());
+            Sleep(1000);
+            continue;
+        }
+
+        // Wait for a client (the UI) to connect
+        if (!ConnectNamedPipe(hPipe, NULL) && GetLastError() != ERROR_PIPE_CONNECTED) {
+            CloseHandle(hPipe);
+            continue;
+        }
+
+        printf("[Pipe] Client connected\n");
+
+        PIPE_REQUEST req = { 0 };
+        PIPE_RESPONSE resp = { 0 };
+        DWORD bytesRead = 0;
+
+        if (ReadFile(hPipe, &req, sizeof(req), &bytesRead, NULL) &&
+            bytesRead == sizeof(req)) {
+
+            switch (req.Command) {
+            case PIPE_CMD_START_SEAT:
+                printf("[Pipe] CMD_START_SEAT: seat=%lu user=%ws\n",
+                       req.SeatIndex, req.Username);
+                resp.Success = SessionManager_CreateSeat(
+                    req.SeatIndex, req.Username, req.Password, req.MonitorDevice);
+                if (resp.Success) {
+                    resp.SessionId = SessionManager_GetSessionId(req.SeatIndex);
+                    DllInjector_InjectSession(resp.SessionId);
+                    DllInjector_WatchSession(resp.SessionId);
+                    wcscpy_s(resp.ErrorMsg, 128, L"Session created successfully.");
+                } else {
+                    wcscpy_s(resp.ErrorMsg, 128, L"Failed to create session.");
+                }
+                break;
+
+            case PIPE_CMD_STOP_SEAT:
+                printf("[Pipe] CMD_STOP_SEAT: seat=%lu\n", req.SeatIndex);
+                resp.Success = SessionManager_TerminateSeat(req.SeatIndex);
+                wcscpy_s(resp.ErrorMsg, 128,
+                    resp.Success ? L"Session stopped." : L"Failed to stop session.");
+                break;
+
+            case PIPE_CMD_PING:
+                resp.Success = TRUE;
+                wcscpy_s(resp.ErrorMsg, 128, L"MultiseatSvc is running.");
+                break;
+
+            default:
+                resp.Success = FALSE;
+                wcscpy_s(resp.ErrorMsg, 128, L"Unknown command.");
+                break;
+            }
+        }
+
+        DWORD bytesWritten = 0;
+        WriteFile(hPipe, &resp, sizeof(resp), &bytesWritten, NULL);
+        FlushFileBuffers(hPipe);
+        DisconnectNamedPipe(hPipe);
+        CloseHandle(hPipe);
+    }
+    return 0;
 }

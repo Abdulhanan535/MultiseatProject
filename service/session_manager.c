@@ -183,38 +183,12 @@ BOOL SessionManager_CreateSeat(
     // ── 5. Set the token to the new session and launch userinit ──
     if (newSessionId != (DWORD)-1) {
         SetTokenInformation(hToken, TokenSessionId, &newSessionId, sizeof(DWORD));
-        if (!LaunchLogon(hToken, newSessionId)) {
-            printf("[SessionMgr] LaunchLogon failed\n");
-            CloseHandle(hToken);
-            return FALSE;
-        }
-    } else {
-        // Consumer Windows: use RDP loopback to create a real second session
-        printf("[SessionMgr] Using RDP loopback for concurrent session\n");
+    }
 
-        // Save credentials so mstsc doesn't prompt
-        WCHAR cmdkeycmd[256];
-        swprintf_s(cmdkeycmd, _countof(cmdkeycmd),
-            L"cmdkey /generic:127.0.0.2 /user:%ws /pass:%ws", username, password);
-        _wsystem(cmdkeycmd);
-
-        // Enable RDP if not already
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server",
-                0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-            DWORD val = 0;
-            RegSetValueExW(hKey, L"fDenyTSConnections", 0, REG_DWORD, (BYTE*)&val, 4);
-            RegCloseKey(hKey);
-        }
-
-        // Launch RDP to localhost (creates a second concurrent session)
-        STARTUPINFOW si2 = { sizeof(si2) };
-        PROCESS_INFORMATION pi2 = { 0 };
-        WCHAR mstscCmd[128] = L"mstsc /v:127.0.0.2 /w:1920 /h:1080";
-        CreateProcessW(NULL, mstscCmd, NULL, NULL, FALSE,
-            0, NULL, NULL, &si2, &pi2);
-        if (pi2.hProcess) { CloseHandle(pi2.hProcess); CloseHandle(pi2.hThread); }
+    if (!LaunchLogon(hToken, newSessionId != (DWORD)-1 ? newSessionId : 0)) {
+        printf("[SessionMgr] LaunchLogon failed: %lu\n", GetLastError());
+        CloseHandle(hToken);
+        return FALSE;
     }
     CloseHandle(hToken);
 
