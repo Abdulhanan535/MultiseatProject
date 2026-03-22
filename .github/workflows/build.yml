@@ -54,7 +54,7 @@ jobs:
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd service\mutex_hook
-        cl /LD /W4 /O2 /nologo mutex_hook.c ^
+        cl /LD /W4 /O2 /nologo /D UNICODE /D _UNICODE mutex_hook.c ^
            /link /DLL /OUT:multiseat_mutex_hook.dll kernel32.lib
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo mutex hook DLL built OK
@@ -65,7 +65,7 @@ jobs:
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd service
-        cl /W4 /O2 /nologo ^
+        cl /W4 /O2 /nologo /D UNICODE /D _UNICODE ^
           main.c session_manager.c device_manager.c ^
           display_manager.c dll_injector.c termsrv_patch.c ^
           /link advapi32.lib wtsapi32.lib netapi32.lib ^
@@ -86,7 +86,7 @@ jobs:
         copy service\session_manager.h ui\
         copy service\dll_injector.h ui\
         cd ui
-        cl /W4 /O2 /nologo main.c ^
+        cl /W4 /O2 /nologo /D UNICODE /D _UNICODE main.c ^
           ..\service\device_manager.c ^
           ..\service\display_manager.c ^
           ..\service\session_manager.c ^

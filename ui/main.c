@@ -82,7 +82,7 @@ int WINAPI wWinMain(HINSTANCE hI, HINSTANCE hP, LPWSTR cmd, int show)
     wc.lpszClassName = L"MultiseatUI";
     wc.lpfnWndProc   = WndProc;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(COLOR_BG);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW+1);
     wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
@@ -141,14 +141,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_START), TRUE);
         SetStatus(wp ? L"✓ Seat 2 session started!" : L"✗ Failed to start session.");
         return 0;
-
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORDLG: {
-        HDC hdc = (HDC)wp;
-        SetTextColor(hdc, COLOR_TEXT);
-        SetBkColor(hdc, COLOR_PANEL);
-        return (LRESULT)CreateSolidBrush(COLOR_PANEL);
-    }
 
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
