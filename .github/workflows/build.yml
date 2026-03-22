@@ -4,51 +4,18 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-  workflow_dispatch:   # lets you click "Run workflow" manually
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-2022   # Windows Server 2022 with VS 2022 pre-installed
+    runs-on: windows-2022
 
     steps:
     # ── 1. Checkout code ─────────────────────────────────────
     - name: Checkout
       uses: actions/checkout@v4
 
-    # ── 2. Install WDK 11 ───────────────────────────────────
-    #  The runner has VS 2022 but not WDK.  We download the
-    #  WDK installer and its VS extension for MSBuild targets.
-    - name: Install Windows Driver Kit 11
-      shell: powershell
-      run: |
-        Write-Host "Downloading WDK..."
-        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
-        $wdkInstaller = "$env:TEMP\wdksetup.exe"
-        Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
-        Write-Host "Installing WDK silently (with /features +)..."
-        Start-Process -FilePath $wdkInstaller `
-          -ArgumentList "/quiet /norestart /features +" `
-          -Wait -NoNewWindow
-        Write-Host "WDK core installation complete."
-
-        # Install the WDK VS2022 extension (provides MSBuild driver targets)
-        $vsixPath = Get-ChildItem `
-          "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022" `
-          -Filter "*.vsix" -Recurse -ErrorAction SilentlyContinue |
-          Select-Object -First 1 -ExpandProperty FullName
-
-        if ($vsixPath) {
-          Write-Host "Installing WDK VS extension: $vsixPath"
-          $vsixInstaller = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe"
-          Start-Process -FilePath $vsixInstaller `
-            -ArgumentList "/quiet `"$vsixPath`"" `
-            -Wait -NoNewWindow
-          Write-Host "WDK VS extension installed."
-        } else {
-          Write-Warning "WDK VSIX not found, MSBuild driver targets may be missing."
-        }
-
-    # ── 3. Build the mutex hook DLL ──────────────────────────
+    # ── 2. Build the mutex hook DLL ──────────────────────────
     - name: Build mutex hook DLL
       shell: cmd
       run: |
@@ -59,143 +26,36 @@ jobs:
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo mutex hook DLL built OK
 
-    # ── 4. Build the service EXE ─────────────────────────────
-    - name: Build service
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        cd service
-        cl /W4 /O2 /nologo /D UNICODE /D _UNICODE ^
-          main.c session_manager.c device_manager.c ^
-          display_manager.c dll_injector.c termsrv_patch.c ^
-          /link advapi32.lib wtsapi32.lib netapi32.lib ^
-          setupapi.lib hid.lib userenv.lib shlwapi.lib ^
-          ole32.lib oleaut32.lib wbemuuid.lib ^
-          user32.lib gdi32.lib ^
-          /OUT:MultiseatSvc.exe /SUBSYSTEM:CONSOLE
-        if %errorlevel% neq 0 exit /b %errorlevel%
-        echo service built OK
-
-    # ── 5. Build the control panel EXE ──────────────────────
-    - name: Build control panel UI
+    # ── 3. Build the control panel EXE (single exe, no service)
+    - name: Build control panel
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd ui
-        cl /W4 /O2 /nologo /D UNICODE /D _UNICODE main.c ^
-          ..\service\device_manager.c ^
-          ..\service\display_manager.c ^
+        cl /W4 /O2 /nologo /D UNICODE /D _UNICODE ^
+          main.c ^
+          ..\service\session_manager.c ^
+          ..\service\dll_injector.c ^
+          ..\service\termsrv_patch.c ^
           /I ..\shared /I ..\service ^
-          /link user32.lib gdi32.lib comctl32.lib wtsapi32.lib ^
-          advapi32.lib setupapi.lib hid.lib shlwapi.lib ^
+          /link user32.lib gdi32.lib comctl32.lib advapi32.lib ^
+          wtsapi32.lib netapi32.lib userenv.lib ^
           /OUT:MultiseatCtrlPanel.exe /SUBSYSTEM:WINDOWS
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo control panel built OK
 
-    # ── 6. Build the kernel driver ───────────────────────────
-    - name: Verify WDK installation
-      shell: powershell
-      run: |
-        $wdkRoot = "C:\Program Files (x86)\Windows Kits\10"
-        if (Test-Path $wdkRoot) {
-          Write-Host "WDK found at: $wdkRoot"
-          # List installed WDK build targets
-          $buildDir = Join-Path $wdkRoot "build"
-          if (Test-Path $buildDir) {
-            Write-Host "WDK build directory contents:"
-            Get-ChildItem $buildDir | ForEach-Object { Write-Host "  $_" }
-          }
-          # Check for platform toolset
-          $toolsetDir = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0"
-          if (Test-Path $toolsetDir) {
-            Write-Host "WDK platform toolset found at: $toolsetDir"
-          } else {
-            Write-Warning "WDK platform toolset not found at expected path. Listing available toolsets..."
-            Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\Platforms\x64\PlatformToolsets" -ErrorAction SilentlyContinue |
-              ForEach-Object { Write-Host "  $_" }
-          }
-        } else {
-          Write-Error "WDK not found!"
-          exit 1
-        }
-
-    - name: Build kernel driver
-      shell: powershell
-      run: |
-        # Find msbuild - it's part of VS2022 on the runner
-        $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-          -latest -requires Microsoft.Component.MSBuild `
-          -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
-
-        if (-not $msbuild) {
-          # Fallback hardcoded path for VS2022 Enterprise on GitHub runners
-          $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
-        }
-
-        Write-Host "Using MSBuild: $msbuild"
-
-        & $msbuild driver\multiseat_filter.vcxproj `
-          /p:Configuration=Release /p:Platform=x64 /nologo /v:normal
-
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "Driver build failed"
-          exit $LASTEXITCODE
-        }
-        Write-Host "Kernel driver built OK"
-
-    # ── 7. Test-sign the driver ──────────────────────────────
-    - name: Create test certificate and sign driver
-      shell: powershell
-      run: |
-        # Create a self-signed test cert (dev only — real release needs EV cert)
-        $cert = New-SelfSignedCertificate `
-          -Subject "CN=MultiseatProject Test" `
-          -CertStoreLocation "Cert:\CurrentUser\My" `
-          -KeyUsage DigitalSignature `
-          -Type CodeSigningCert
-        $thumbprint = $cert.Thumbprint
-        Write-Host "Certificate thumbprint: $thumbprint"
-
-        # Find signtool
-        $signtool = Get-ChildItem `
-          "C:\Program Files (x86)\Windows Kits\10\bin" `
-          -Recurse -Filter "signtool.exe" |
-          Where-Object { $_.FullName -match "x64" } |
-          Select-Object -First 1 -ExpandProperty FullName
-
-        # Sign the .sys file
-        $sysPath = Get-ChildItem -Recurse -Filter "multiseat_filter.sys" |
-                   Select-Object -First 1 -ExpandProperty FullName
-        if ($sysPath) {
-          & $signtool sign /fd SHA256 /sha1 $thumbprint $sysPath
-          Write-Host "Driver signed: $sysPath"
-        } else {
-          Write-Warning "multiseat_filter.sys not found, skipping sign"
-        }
-
-    # ── 8. Collect all outputs ───────────────────────────────
+    # ── 4. Collect outputs ───────────────────────────────────
     - name: Collect build artifacts
       shell: powershell
       run: |
         New-Item -ItemType Directory -Force -Path "artifacts"
-
-        # Service
-        Copy-Item "service\MultiseatSvc.exe"              "artifacts\" -ErrorAction SilentlyContinue
-        # Hook DLL
+        Copy-Item "ui\MultiseatCtrlPanel.exe"                   "artifacts\" -ErrorAction SilentlyContinue
         Copy-Item "service\mutex_hook\multiseat_mutex_hook.dll" "artifacts\" -ErrorAction SilentlyContinue
-        # UI
-        Copy-Item "ui\MultiseatCtrlPanel.exe"             "artifacts\" -ErrorAction SilentlyContinue
-        # Driver + INF
-        Get-ChildItem -Recurse -Filter "multiseat_filter.sys" |
-          Copy-Item -Destination "artifacts\" -ErrorAction SilentlyContinue
-        Copy-Item "driver\multiseat_filter.inf"           "artifacts\" -ErrorAction SilentlyContinue
-        # README
-        Copy-Item "README.md"                             "artifacts\" -ErrorAction SilentlyContinue
-
+        Copy-Item "README.md"                                   "artifacts\" -ErrorAction SilentlyContinue
         Write-Host "--- Artifacts ---"
         Get-ChildItem "artifacts"
 
-    # ── 9. Upload as downloadable artifact ──────────────────
+    # ── 5. Upload as downloadable artifact ──────────────────
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:

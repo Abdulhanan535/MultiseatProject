@@ -6,8 +6,6 @@
 #include <windows.h>
 #include <stdio.h>
 #include "session_manager.h"
-#include "device_manager.h"
-#include "display_manager.h"
 #include "dll_injector.h"
 #include "termsrv_patch.h"
 #include "../shared/pipe_protocol.h"
@@ -73,14 +71,9 @@ static VOID RunLogic(void)
 
     // ── 1. Initialize all sub-systems ────────────────────────
     SessionManager_Init();      // also patches termsrv.dll
-    DisplayManager_Enumerate();
-    DeviceManager_Enumerate();
 
     // ── 2. Locate the hook DLL (same dir as service exe) ─────
     DllInjector_Init(GetHookDllPath());
-
-    // ── 3. Load saved device/monitor assignments ─────────────
-    DeviceManager_LoadConfig(CONFIG_PATH);
 
     SetSvcStatus(SERVICE_RUNNING);
     printf("[Main] Service ready.\n");

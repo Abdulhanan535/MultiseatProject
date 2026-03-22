@@ -163,46 +163,71 @@ BOOL SessionManager_CreateSeat(
         return FALSE;
     }
 
-    // ── 4. Create a dynamic WinStation (new session slot) ────────
-    if (!pfnCreateDynamic) {
-        printf("[SessionMgr] WinStationCreateDynamic not available.\n"
-               "  → Using CreateProcessAsUser fallback.\n");
-    }
-
+    // ── 4. Try WinStation API or RDP loopback ─────────────────────
     DWORD newSessionId = (DWORD)-1;
+
     if (pfnCreateDynamic) {
-        if (!pfnCreateDynamic(WTS_CURRENT_SERVER_HANDLE, &newSessionId)) {
-            printf("[SessionMgr] WinStationCreateDynamic failed: %lu\n",
-                   GetLastError());
-        } else {
-            printf("[SessionMgr] Dynamic WinStation created: session %lu\n",
-                   newSessionId);
+        if (pfnCreateDynamic(WTS_CURRENT_SERVER_HANDLE, &newSessionId)) {
+            printf("[SessionMgr] Dynamic WinStation: session %lu\n", newSessionId);
+            SetTokenInformation(hToken, TokenSessionId, &newSessionId, sizeof(DWORD));
+            if (!LaunchLogon(hToken, newSessionId)) {
+                printf("[SessionMgr] LaunchLogon failed: %lu\n", GetLastError());
+                CloseHandle(hToken);
+                return FALSE;
+            }
         }
     }
 
-    // ── 5. Set the token to the new session and launch userinit ──
-    if (newSessionId != (DWORD)-1) {
-        // WinStation API gave us a fresh session
-        SetTokenInformation(hToken, TokenSessionId, &newSessionId, sizeof(DWORD));
+    if (newSessionId == (DWORD)-1) {
+        // Consumer Windows: RDP loopback creates a real separate session.
+        printf("[SessionMgr] Using RDP loopback for session creation\n");
+        CloseHandle(hToken);  // done with this, RDP will handle logon
+
+        // Enable RDP
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server",
+                0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+            DWORD val = 0;
+            RegSetValueExW(hKey, L"fDenyTSConnections", 0, REG_DWORD, (BYTE*)&val, 4);
+            val = 0;
+            RegSetValueExW(hKey, L"fSingleSessionPerUser", 0, REG_DWORD, (BYTE*)&val, 4);
+            RegCloseKey(hKey);
+        }
+
+        // Save credentials for silent login
+        WCHAR cmd[512];
+        swprintf_s(cmd, _countof(cmd),
+            L"cmd.exe /c cmdkey /generic:TERMSRV/127.0.0.2 /user:%ws /pass:%ws",
+            username, password);
+        STARTUPINFOW si = { sizeof(si) };
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = { 0 };
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        }
+
+        // Launch mstsc silently
+        WCHAR mstsc[256];
+        swprintf_s(mstsc, _countof(mstsc),
+            L"mstsc /v:127.0.0.2 /w:1920 /h:1080");
+        STARTUPINFOW si2 = { sizeof(si2) };
+        si2.dwFlags = STARTF_USESHOWWINDOW;
+        si2.wShowWindow = SW_MINIMIZE;
+        PROCESS_INFORMATION pi2 = { 0 };
+        if (!CreateProcessW(NULL, mstsc, NULL, NULL, FALSE,
+                0, NULL, NULL, &si2, &pi2)) {
+            printf("[SessionMgr] Failed to launch mstsc: %lu\n", GetLastError());
+            return FALSE;
+        }
+        printf("[SessionMgr] mstsc launched, waiting for session...\n");
+        CloseHandle(pi2.hProcess); CloseHandle(pi2.hThread);
     } else {
-        // Consumer Windows fallback: use the active console session.
-        // The termsrv patch allows concurrent sessions. Setting the
-        // token to the console session and launching userinit will
-        // trigger Fast User Switching which creates a new session
-        // for the second user automatically.
-        DWORD consoleSid = WTSGetActiveConsoleSessionId();
-        printf("[SessionMgr] No WinStation API, using console session %lu\n", consoleSid);
-        if (consoleSid != 0xFFFFFFFF) {
-            SetTokenInformation(hToken, TokenSessionId, &consoleSid, sizeof(DWORD));
-        }
-    }
-
-    if (!LaunchLogon(hToken, newSessionId)) {
-        printf("[SessionMgr] LaunchLogon failed: %lu\n", GetLastError());
         CloseHandle(hToken);
-        return FALSE;
     }
-    CloseHandle(hToken);
 
     // ── 6. Wait for the session to appear in the WTS list ────────
     for (int i = 0; i < 120; i++) {
@@ -222,113 +247,13 @@ BOOL SessionManager_CreateSeat(
     printf("[SessionMgr] Session %lu created for [%ws]\n", newSessionId, username);
     g_Seats[seatIndex].SessionId = newSessionId;
     g_Seats[seatIndex].Active    = TRUE;
-    wcscpy_s(g_Seats[seatIndex].MonitorDevice,
-             _countof(g_Seats[seatIndex].MonitorDevice),
-             monitorDeviceName);
 
-attach_display:
-    // ── 7. Attach session to a physical display ──────────────────
-    //  We tell the WinStation which GPU output to use.
-    //  On a multi-monitor system each DISPLAY adapter can be
-    //  independently assigned to a session.
-    SessionManager_AssignDisplay(seatIndex, monitorDeviceName);
-
-    // ── 8. Notify the kernel driver of the session mapping ───────
-    NotifyDriverSeatSession(seatIndex, g_Seats[seatIndex].SessionId);
-
-    printf("[SessionMgr] Seat %lu ready → session %lu → monitor %ws\n",
-           seatIndex, g_Seats[seatIndex].SessionId, monitorDeviceName);
+    printf("[SessionMgr] Seat %lu ready -> session %lu\n",
+           seatIndex, g_Seats[seatIndex].SessionId);
     return TRUE;
 }
 
-// ================================================================
-//  SessionManager_AssignDisplay
-//
-//  Moves a session to a physical monitor by updating the
-//  WinStation's video configuration to point at the right
-//  GPU adapter/output.
-//
-//  This is what makes it NOT RDP — the session draws directly to
-//  the physical framebuffer of the assigned monitor.
-// ================================================================
-BOOL SessionManager_AssignDisplay(ULONG seatIndex, LPCWSTR monitorDeviceName)
-{
-    ULONG sid = g_Seats[seatIndex].SessionId;
-    if (sid == (ULONG)-1) return FALSE;
 
-    // We use ChangeDisplaySettingsExW to bind the monitor to the session.
-    // In a full kernel-mode implementation you'd call
-    // DrvSetMonitorSessionBinding (dxgkrnl.sys), but from usermode
-    // the supported path is through the WDDM/DWM APIs:
-
-    // Step A: Move the session's desktop window station to the target monitor.
-    //         On Win11 with WDDM 3.x, each session has its own DWM instance
-    //         which we can redirect by setting the session's primary adapter.
-
-    // Step B: Use SetupAPI / Display adapter path to associate the output.
-    DISPLAY_DEVICEW dd = { sizeof(dd) };
-    BOOL found = FALSE;
-
-    for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) {
-        if (_wcsicmp(dd.DeviceName, monitorDeviceName) == 0) {
-            found = TRUE;
-            break;
-        }
-    }
-
-    if (!found) {
-        printf("[SessionMgr] Monitor %ws not found\n", monitorDeviceName);
-        return FALSE;
-    }
-
-    // Get current mode
-    DEVMODEW dm = { 0 };
-    dm.dmSize = sizeof(dm);
-    EnumDisplaySettingsW(monitorDeviceName, ENUM_CURRENT_SETTINGS, &dm);
-
-    // Attach this display to the session.
-    // Full display-session binding requires kernel-mode code (see display_driver/);
-    // from usermode we set the monitor as the session's primary display
-    // by calling ChangeDisplaySettingsEx within the context of that session.
-    // We do that via CreateRemoteThread into the session's winlogon.exe:
-
-    DWORD winlogonPid = 0;
-    PWTS_PROCESS_INFOW procs = NULL;
-    DWORD procCount = 0;
-
-    if (WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &procs, &procCount)) {
-        for (DWORD i = 0; i < procCount; i++) {
-            if (procs[i].SessionId == sid &&
-                _wcsicmp(procs[i].pProcessName, L"winlogon.exe") == 0) {
-                winlogonPid = procs[i].ProcessId;
-                break;
-            }
-        }
-        WTSFreeMemory(procs);
-    }
-
-    if (!winlogonPid) {
-        printf("[SessionMgr] winlogon.exe not found in session %lu\n", sid);
-        return FALSE;
-    }
-
-    // Inject a display-settings call into winlogon via a remote thread.
-    // We allocate a small stub in its address space:
-    //   push  monitorDeviceName
-    //   call  ChangeDisplaySettingsExW(name, dm, NULL, 0, NULL)
-    // In practice we use a helper DLL (multiseat_display_helper.dll)
-    // loaded via CreateRemoteThread → LoadLibraryW.
-
-    printf("[SessionMgr] Assigning monitor %ws to session %lu via winlogon(%lu)\n",
-           monitorDeviceName, sid, winlogonPid);
-
-    // Simplified: just record the assignment.
-    // The display_driver component handles the actual GPU-level binding.
-    wcscpy_s(g_Seats[seatIndex].MonitorDevice,
-             _countof(g_Seats[seatIndex].MonitorDevice),
-             monitorDeviceName);
-    return TRUE;
-}
 
 // ================================================================
 //  SessionManager_GetSessionId
@@ -368,26 +293,7 @@ void SessionManager_Shutdown(void)
     TermsrvPatch_Revert();
 }
 
-// ================================================================
-//  NotifyDriverSeatSession
-// ================================================================
-BOOL NotifyDriverSeatSession(ULONG seatIndex, ULONG sessionId)
-{
-    HANDLE hDriver = CreateFileW(
-        MULTISEAT_WIN32_NAME,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        NULL, OPEN_EXISTING, 0, NULL);
 
-    if (hDriver == INVALID_HANDLE_VALUE) return FALSE;
-
-    SET_SEAT_SESSION_REQUEST req = { seatIndex, sessionId };
-    DWORD br = 0;
-    BOOL ok = DeviceIoControl(hDriver, IOCTL_MS_SET_SEAT_SESSION,
-                              &req, (DWORD)sizeof(req), NULL, 0, &br, NULL);
-    CloseHandle(hDriver);
-    return ok;
-}
 
 // ================================================================
 //  EnsureLocalUser
