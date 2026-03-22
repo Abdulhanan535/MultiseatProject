@@ -80,7 +80,7 @@ int WINAPI wWinMain(HINSTANCE hI, HINSTANCE hP, LPWSTR cmd, int show)
 
     g_hWnd = CreateWindowExW(0, L"MultiseatUI",
         L"Multiseat Control Panel",
-        WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 600, 480,
         NULL, NULL, hI, NULL);
     ShowWindow(g_hWnd, show);

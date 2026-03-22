@@ -124,6 +124,102 @@ BOOL SessionManager_Init(void)
 }
 
 // ================================================================
+//  LaunchSunshineInSession
+//  Starts Sunshine in the given session on port 47990 so the
+//  remote player connects via Moonlight to that port.
+// ================================================================
+static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR password)
+{
+    // Find Sunshine install path
+    WCHAR sunPath[MAX_PATH] = {0};
+    WCHAR testPaths[][MAX_PATH] = {
+        L"C:\\Program Files\\Sunshine\\sunshine.exe",
+        L"C:\\Program Files (x86)\\Sunshine\\sunshine.exe",
+    };
+    for (int i = 0; i < 2; i++) {
+        if (GetFileAttributesW(testPaths[i]) != INVALID_FILE_ATTRIBUTES) {
+            wcscpy_s(sunPath, MAX_PATH, testPaths[i]);
+            break;
+        }
+    }
+
+    if (!sunPath[0]) {
+        printf("[SessionMgr] Sunshine not found, skipping auto-launch\n");
+        return FALSE;
+    }
+
+    // Write a config file for this seat with a different port
+    WCHAR configDir[MAX_PATH];
+    swprintf_s(configDir, MAX_PATH, L"C:\\ProgramData\\MultiseatProject\\sunshine_seat%lu", (ULONG)sessionId);
+    CreateDirectoryW(L"C:\\ProgramData\\MultiseatProject", NULL);
+    CreateDirectoryW(configDir, NULL);
+
+    WCHAR configPath[MAX_PATH];
+    swprintf_s(configPath, MAX_PATH, L"%ws\\sunshine.conf", configDir);
+
+    // Write config with port 47990 (default is 47989)
+    HANDLE hFile = CreateFileW(configPath, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        char config[] =
+            "port = 47990\n"
+            "min_log_level = info\n"
+            "origin_web_ui_allowed = lan\n";
+        DWORD bw;
+        WriteFile(hFile, config, (DWORD)strlen(config), &bw, NULL);
+        CloseHandle(hFile);
+        printf("[SessionMgr] Sunshine config written to %ws\n", configPath);
+    }
+
+    // Log on as this user to get a token for the session
+    HANDLE hToken = NULL;
+    if (!LogonUserW((LPWSTR)username, L".", (LPWSTR)password,
+            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
+        printf("[SessionMgr] LogonUser for Sunshine failed: %lu\n", GetLastError());
+        return FALSE;
+    }
+
+    // Set the token to the target session
+    SetTokenInformation(hToken, TokenSessionId, &sessionId, sizeof(DWORD));
+
+    // Build command line: sunshine.exe <config path>
+    WCHAR cmdLine[MAX_PATH * 2];
+    swprintf_s(cmdLine, _countof(cmdLine), L"\"%ws\" \"%ws\"", sunPath, configPath);
+
+    // Get the directory of sunshine.exe for working dir
+    WCHAR sunDir[MAX_PATH];
+    wcscpy_s(sunDir, MAX_PATH, sunPath);
+    WCHAR* lastSlash = wcsrchr(sunDir, L'\\');
+    if (lastSlash) *lastSlash = L'\0';
+
+    LPVOID envBlock = NULL;
+    CreateEnvironmentBlock(&envBlock, hToken, FALSE);
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.lpDesktop = L"WinSta0\\Default";
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi = { 0 };
+    BOOL ok = CreateProcessAsUserW(hToken, NULL, cmdLine, NULL, NULL, FALSE,
+        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+        envBlock, sunDir, &si, &pi);
+
+    if (ok) {
+        printf("[SessionMgr] Sunshine launched in session %lu (PID %lu), port 47990\n",
+               sessionId, pi.dwProcessId);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else {
+        printf("[SessionMgr] Failed to launch Sunshine: %lu\n", GetLastError());
+    }
+
+    if (envBlock) DestroyEnvironmentBlock(envBlock);
+    CloseHandle(hToken);
+    return ok;
+}
+
+// ================================================================
 //  SessionManager_CreateSeat
 //  Creates a real, independent local Windows session.
 // ================================================================
@@ -219,20 +315,20 @@ BOOL SessionManager_CreateSeat(
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
         }
 
-        // Launch mstsc silently
+        // Launch mstsc hidden (just for session creation plumbing)
         WCHAR mstsc[256];
         swprintf_s(mstsc, _countof(mstsc),
             L"mstsc /v:127.0.0.2 /w:1920 /h:1080");
         STARTUPINFOW si2 = { sizeof(si2) };
         si2.dwFlags = STARTF_USESHOWWINDOW;
-        si2.wShowWindow = SW_MINIMIZE;
+        si2.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION pi2 = { 0 };
         if (!CreateProcessW(NULL, mstsc, NULL, NULL, FALSE,
-                0, NULL, NULL, &si2, &pi2)) {
+                CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2)) {
             printf("[SessionMgr] Failed to launch mstsc: %lu\n", GetLastError());
             return FALSE;
         }
-        printf("[SessionMgr] mstsc launched, waiting for session...\n");
+        printf("[SessionMgr] mstsc launched (hidden), waiting for session...\n");
         CloseHandle(pi2.hProcess); CloseHandle(pi2.hThread);
     } else {
         CloseHandle(hToken);
@@ -256,6 +352,9 @@ BOOL SessionManager_CreateSeat(
     printf("[SessionMgr] Session %lu created for [%ws]\n", newSessionId, username);
     g_Seats[seatIndex].SessionId = newSessionId;
     g_Seats[seatIndex].Active    = TRUE;
+
+    // ── 7. Launch Sunshine in the new session on port 47990 ──────
+    LaunchSunshineInSession(newSessionId, username, password);
 
     printf("[SessionMgr] Seat %lu ready -> session %lu\n",
            seatIndex, g_Seats[seatIndex].SessionId);
