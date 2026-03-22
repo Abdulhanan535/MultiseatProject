@@ -261,7 +261,16 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hInst);
-        InstallHooks();
+        // Only hook in secondary sessions (Seat 2+), not the main user's session.
+        // This makes it safe to load via AppInit_DLLs into all processes.
+        {
+            DWORD mySession = 0;
+            ProcessIdToSessionId(GetCurrentProcessId(), &mySession);
+            DWORD consoleSession = WTSGetActiveConsoleSessionId();
+            if (mySession != consoleSession && mySession != 0) {
+                InstallHooks();
+            }
+        }
         break;
     case DLL_PROCESS_DETACH:
         RemoveHooks();

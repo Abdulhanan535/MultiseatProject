@@ -88,6 +88,47 @@ static BOOL EnsureLocalUser(LPCWSTR username, LPCWSTR password);
 static ULONG FindSessionByUser(LPCWSTR username);
 static BOOL LaunchLogon(HANDLE hToken, DWORD sessionId);
 static BOOL EnableDebugPrivilege(void);
+static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR password);
+
+// ── AppInit_DLLs for global mutex hook ───────────────────────────
+// Sets the hook DLL to load into every GUI process system-wide.
+// The DLL itself checks session ID and only hooks in secondary sessions.
+static void EnableGlobalMutexHook(void)
+{
+    WCHAR dllPath[MAX_PATH];
+    GetModuleFileNameW(NULL, dllPath, MAX_PATH);
+    WCHAR* lastSlash = wcsrchr(dllPath, L'\\');
+    if (lastSlash) wcscpy_s(lastSlash + 1, MAX_PATH - (lastSlash - dllPath + 1),
+                            L"multiseat_mutex_hook.dll");
+
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
+            0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"AppInit_DLLs", 0, REG_SZ,
+            (BYTE*)dllPath, (DWORD)((wcslen(dllPath) + 1) * sizeof(WCHAR)));
+        DWORD one = 1, zero = 0;
+        RegSetValueExW(hKey, L"LoadAppInit_DLLs", 0, REG_DWORD, (BYTE*)&one, 4);
+        RegSetValueExW(hKey, L"RequireSignedAppInit_DLLs", 0, REG_DWORD, (BYTE*)&zero, 4);
+        RegCloseKey(hKey);
+        printf("[SessionMgr] Global mutex hook enabled via AppInit_DLLs\n");
+    }
+}
+
+static void DisableGlobalMutexHook(void)
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
+            0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        WCHAR empty[] = L"";
+        RegSetValueExW(hKey, L"AppInit_DLLs", 0, REG_SZ, (BYTE*)empty, sizeof(empty));
+        DWORD zero = 0;
+        RegSetValueExW(hKey, L"LoadAppInit_DLLs", 0, REG_DWORD, (BYTE*)&zero, 4);
+        RegCloseKey(hKey);
+        printf("[SessionMgr] Global mutex hook disabled\n");
+    }
+}
 
 // ================================================================
 //  SessionManager_Init
@@ -148,23 +189,39 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
         return FALSE;
     }
 
-    // Write a config file for this seat with a different port
+    // Write a fully isolated config for Seat2
     WCHAR configDir[MAX_PATH];
-    swprintf_s(configDir, MAX_PATH, L"C:\\ProgramData\\MultiseatProject\\sunshine_seat%lu", (ULONG)sessionId);
+    swprintf_s(configDir, MAX_PATH, L"C:\\ProgramData\\MultiseatProject\\sunshine_seat2");
     CreateDirectoryW(L"C:\\ProgramData\\MultiseatProject", NULL);
     CreateDirectoryW(configDir, NULL);
 
     WCHAR configPath[MAX_PATH];
     swprintf_s(configPath, MAX_PATH, L"%ws\\sunshine.conf", configDir);
 
-    // Write config with port 47990 (default is 47989)
+    // Write config with different port + fully separate state/credentials
+    // Port 47990 (default Sunshine uses 47989)
+    // All paths are local to this config dir so no conflict with main Sunshine
     HANDLE hFile = CreateFileW(configPath, GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
-        char config[] =
+        char configDirA[MAX_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, configDir, -1, configDirA, MAX_PATH, NULL, NULL);
+        char config[2048];
+        sprintf_s(config, sizeof(config),
             "port = 47990\n"
+            "sunshine_name = Seat2\n"
             "min_log_level = info\n"
-            "origin_web_ui_allowed = lan\n";
+            "origin_web_ui_allowed = lan\n"
+            "credentials_file = %s\\credentials.json\n"
+            "file_state = %s\\state.json\n"
+            "log_path = %s\\sunshine.log\n"
+            "pkey = %s\\key.pem\n"
+            "cert = %s\\cert.pem\n",
+            configDirA, configDirA, configDirA, configDirA, configDirA);
+        // Replace backslashes with forward slashes for Sunshine's config parser
+        for (char* p = config; *p; p++) {
+            if (*p == '\\') *p = '/';
+        }
         DWORD bw;
         WriteFile(hFile, config, (DWORD)strlen(config), &bw, NULL);
         CloseHandle(hFile);
@@ -283,6 +340,8 @@ BOOL SessionManager_CreateSeat(
         }
     }
 
+    HANDLE hMstsc = NULL;
+
     if (newSessionId == (DWORD)-1) {
         // Consumer Windows: RDP loopback creates a real separate session.
         printf("[SessionMgr] Using RDP loopback for session creation\n");
@@ -315,21 +374,22 @@ BOOL SessionManager_CreateSeat(
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
         }
 
-        // Launch mstsc hidden (just for session creation plumbing)
+        // Launch mstsc minimized — we'll kill it once the session appears
         WCHAR mstsc[256];
         swprintf_s(mstsc, _countof(mstsc),
-            L"mstsc /v:127.0.0.2 /w:1920 /h:1080");
+            L"mstsc /v:127.0.0.2 /w:800 /h:600");
         STARTUPINFOW si2 = { sizeof(si2) };
         si2.dwFlags = STARTF_USESHOWWINDOW;
-        si2.wShowWindow = SW_HIDE;
+        si2.wShowWindow = SW_MINIMIZE;
         PROCESS_INFORMATION pi2 = { 0 };
         if (!CreateProcessW(NULL, mstsc, NULL, NULL, FALSE,
-                CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2)) {
+                0, NULL, NULL, &si2, &pi2)) {
             printf("[SessionMgr] Failed to launch mstsc: %lu\n", GetLastError());
             return FALSE;
         }
-        printf("[SessionMgr] mstsc launched (hidden), waiting for session...\n");
-        CloseHandle(pi2.hProcess); CloseHandle(pi2.hThread);
+        printf("[SessionMgr] mstsc launched, waiting for session...\n");
+        hMstsc = pi2.hProcess;
+        CloseHandle(pi2.hThread);
     } else {
         CloseHandle(hToken);
     }
@@ -344,6 +404,13 @@ BOOL SessionManager_CreateSeat(
         }
     }
 
+    // Kill mstsc now that the session is established (session stays alive)
+    if (hMstsc) {
+        TerminateProcess(hMstsc, 0);
+        CloseHandle(hMstsc);
+        printf("[SessionMgr] mstsc terminated (session persists)\n");
+    }
+
     if (newSessionId == (DWORD)-1) {
         printf("[SessionMgr] Timed out waiting for session\n");
         return FALSE;
@@ -353,7 +420,10 @@ BOOL SessionManager_CreateSeat(
     g_Seats[seatIndex].SessionId = newSessionId;
     g_Seats[seatIndex].Active    = TRUE;
 
-    // ── 7. Launch Sunshine in the new session on port 47990 ──────
+    // ── 7. Enable global mutex hook for all apps in Seat 2 ────────
+    EnableGlobalMutexHook();
+
+    // ── 8. Launch Sunshine in the new session on port 47990 ──────
     LaunchSunshineInSession(newSessionId, username, password);
 
     printf("[SessionMgr] Seat %lu ready -> session %lu\n",
@@ -382,6 +452,8 @@ BOOL SessionManager_TerminateSeat(ULONG seatIndex)
 
     if (pfnDisconnect) pfnDisconnect(WTS_CURRENT_SERVER_HANDLE, sid, FALSE);
     WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, sid, FALSE);
+
+    DisableGlobalMutexHook();
 
     g_Seats[seatIndex].Active    = FALSE;
     g_Seats[seatIndex].SessionId = (ULONG)-1;

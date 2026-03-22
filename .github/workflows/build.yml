@@ -35,9 +35,8 @@ jobs:
         cl /W4 /O2 /nologo /D UNICODE /D _UNICODE ^
           main.c ^
           ..\service\session_manager.c ^
-          ..\service\dll_injector.c ^
           ..\service\termsrv_patch.c ^
-          /I ..\shared /I ..\service ^
+          /I ..\service ^
           /link user32.lib gdi32.lib comctl32.lib advapi32.lib ^
           wtsapi32.lib netapi32.lib userenv.lib ^
           /OUT:MultiseatCtrlPanel.exe /SUBSYSTEM:WINDOWS
