@@ -33,6 +33,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Native</SubSystem>
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
