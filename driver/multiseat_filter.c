@@ -11,9 +11,12 @@
 
 #include <ntddk.h>
 #include <wdf.h>
+#include <wdmsec.h>
 #include <hidport.h>
 #include <ntstrsafe.h>
 #include "../shared/protocol.h"
+
+#pragma comment(lib, "wdmsec.lib")
 
 // ── Per-device context ───────────────────────────────────────────
 typedef struct _DEVICE_CTX {
