@@ -17,7 +17,7 @@ jobs:
 
     # ── 2. Install WDK 11 ───────────────────────────────────
     #  The runner has VS 2022 but not WDK.  We download the
-    #  WDK installer silently.
+    #  WDK installer and its VS extension for MSBuild targets.
     - name: Install Windows Driver Kit 11
       shell: powershell
       run: |
@@ -25,11 +25,28 @@ jobs:
         $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
         $wdkInstaller = "$env:TEMP\wdksetup.exe"
         Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
-        Write-Host "Installing WDK silently..."
+        Write-Host "Installing WDK silently (with /features +)..."
         Start-Process -FilePath $wdkInstaller `
-          -ArgumentList "/quiet /norestart" `
+          -ArgumentList "/quiet /norestart /features +" `
           -Wait -NoNewWindow
-        Write-Host "WDK installation complete."
+        Write-Host "WDK core installation complete."
+
+        # Install the WDK VS2022 extension (provides MSBuild driver targets)
+        $vsixPath = Get-ChildItem `
+          "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022" `
+          -Filter "*.vsix" -Recurse -ErrorAction SilentlyContinue |
+          Select-Object -First 1 -ExpandProperty FullName
+
+        if ($vsixPath) {
+          Write-Host "Installing WDK VS extension: $vsixPath"
+          $vsixInstaller = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe"
+          Start-Process -FilePath $vsixInstaller `
+            -ArgumentList "/quiet `"$vsixPath`"" `
+            -Wait -NoNewWindow
+          Write-Host "WDK VS extension installed."
+        } else {
+          Write-Warning "WDK VSIX not found, MSBuild driver targets may be missing."
+        }
 
     # ── 3. Build the mutex hook DLL ──────────────────────────
     - name: Build mutex hook DLL
@@ -83,13 +100,27 @@ jobs:
         echo control panel built OK
 
     # ── 6. Build the kernel driver ───────────────────────────
-    #  We use MSBuild with a minimal .vcxproj generated on the fly.
     - name: Verify WDK installation
       shell: powershell
       run: |
         $wdkRoot = "C:\Program Files (x86)\Windows Kits\10"
         if (Test-Path $wdkRoot) {
           Write-Host "WDK found at: $wdkRoot"
+          # List installed WDK build targets
+          $buildDir = Join-Path $wdkRoot "build"
+          if (Test-Path $buildDir) {
+            Write-Host "WDK build directory contents:"
+            Get-ChildItem $buildDir | ForEach-Object { Write-Host "  $_" }
+          }
+          # Check for platform toolset
+          $toolsetDir = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0"
+          if (Test-Path $toolsetDir) {
+            Write-Host "WDK platform toolset found at: $toolsetDir"
+          } else {
+            Write-Warning "WDK platform toolset not found at expected path. Listing available toolsets..."
+            Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\Platforms\x64\PlatformToolsets" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  $_" }
+          }
         } else {
           Write-Error "WDK not found!"
           exit 1
@@ -110,10 +141,8 @@ jobs:
 
         Write-Host "Using MSBuild: $msbuild"
 
-        $env:WDKContentRoot = "C:\Program Files (x86)\Windows Kits\10\"
-
         & $msbuild driver\multiseat_filter.vcxproj `
-          /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+          /p:Configuration=Release /p:Platform=x64 /nologo /v:normal
 
         if ($LASTEXITCODE -ne 0) {
           Write-Error "Driver build failed"
