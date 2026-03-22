@@ -225,55 +225,89 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
         printf("[SessionMgr] Sunshine config written to %ws\n", configPath);
     }
 
-    // Use schtasks to run Sunshine in Seat2User's interactive session.
-    // /IT = run only when user is logged on (interactive), so it runs
-    // in their session, not ours.
-    // Delete any old task first
-    WCHAR delCmd[512];
-    swprintf_s(delCmd, _countof(delCmd),
-        L"cmd.exe /c schtasks /delete /tn MultiseatSunshine /f 2>nul");
-    STARTUPINFOW si0 = { sizeof(si0) };
-    si0.dwFlags = STARTF_USESHOWWINDOW;
-    si0.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi0 = {0};
-    if (CreateProcessW(NULL, delCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si0, &pi0)) {
-        WaitForSingleObject(pi0.hProcess, 3000);
-        CloseHandle(pi0.hProcess); CloseHandle(pi0.hThread);
+    // Find a process in the target session, duplicate its token, and use
+    // CreateProcessAsUser. The token is already in the right session so
+    // we don't need SeTcbPrivilege (just SeDebugPrivilege, which we have).
+    HANDLE hSessionToken = NULL;
+    PWTS_PROCESS_INFOW procs = NULL;
+    DWORD procCount = 0;
+
+    if (WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &procs, &procCount)) {
+        for (DWORD i = 0; i < procCount; i++) {
+            if (procs[i].SessionId != sessionId) continue;
+            if (procs[i].ProcessId == 0) continue;  // skip System Idle
+
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, procs[i].ProcessId);
+            if (!hProc) continue;
+
+            HANDLE hTok = NULL;
+            if (OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY, &hTok)) {
+                HANDLE hDup = NULL;
+                if (DuplicateTokenEx(hTok, MAXIMUM_ALLOWED, NULL,
+                        SecurityImpersonation, TokenPrimary, &hDup)) {
+                    hSessionToken = hDup;
+                    CloseHandle(hTok);
+                    CloseHandle(hProc);
+                    break;
+                }
+                CloseHandle(hTok);
+            }
+            CloseHandle(hProc);
+        }
+        WTSFreeMemory(procs);
     }
 
-    // Create the task
-    WCHAR createCmd[1024];
-    swprintf_s(createCmd, _countof(createCmd),
-        L"cmd.exe /c schtasks /create /tn MultiseatSunshine "
-        L"/tr \"\\\"%ws\\\" \\\"%ws\\\"\" "
-        L"/sc ONCE /st 00:00 /ru %ws /rp %ws /IT /f",
-        sunPath, configPath, username, password);
-    STARTUPINFOW si1 = { sizeof(si1) };
-    si1.dwFlags = STARTF_USESHOWWINDOW;
-    si1.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi1 = {0};
-    if (!CreateProcessW(NULL, createCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si1, &pi1)) {
-        printf("[SessionMgr] Failed to create Sunshine task: %lu\n", GetLastError());
+    if (!hSessionToken) {
+        printf("[SessionMgr] Could not get token for session %lu\n", sessionId);
         return FALSE;
     }
-    WaitForSingleObject(pi1.hProcess, 5000);
-    CloseHandle(pi1.hProcess); CloseHandle(pi1.hThread);
 
-    // Run the task now
-    WCHAR runCmd[256];
-    swprintf_s(runCmd, _countof(runCmd),
-        L"cmd.exe /c schtasks /run /tn MultiseatSunshine");
-    STARTUPINFOW si2 = { sizeof(si2) };
-    si2.dwFlags = STARTF_USESHOWWINDOW;
-    si2.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi2 = {0};
-    if (CreateProcessW(NULL, runCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2)) {
-        WaitForSingleObject(pi2.hProcess, 5000);
-        CloseHandle(pi2.hProcess); CloseHandle(pi2.hThread);
-        printf("[SessionMgr] Sunshine task started in Seat2User's session, port 47990\n");
+    // Write a launcher batch file (avoids quoting hell)
+    WCHAR batPath[MAX_PATH];
+    swprintf_s(batPath, MAX_PATH, L"%ws\\launch_sunshine.bat", configDir);
+    HANDLE hBat = CreateFileW(batPath, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hBat != INVALID_HANDLE_VALUE) {
+        char batContent[1024];
+        char sunPathA[MAX_PATH], configPathA[MAX_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, sunPath, -1, sunPathA, MAX_PATH, NULL, NULL);
+        WideCharToMultiByte(CP_UTF8, 0, configPath, -1, configPathA, MAX_PATH, NULL, NULL);
+        sprintf_s(batContent, sizeof(batContent),
+            "@echo off\r\n\"%s\" \"%s\"\r\n", sunPathA, configPathA);
+        DWORD bw;
+        WriteFile(hBat, batContent, (DWORD)strlen(batContent), &bw, NULL);
+        CloseHandle(hBat);
     }
 
-    return TRUE;
+    // Launch the bat in the target session
+    WCHAR cmdLine[MAX_PATH * 2];
+    swprintf_s(cmdLine, _countof(cmdLine), L"cmd.exe /c \"%ws\"", batPath);
+
+    LPVOID envBlock = NULL;
+    CreateEnvironmentBlock(&envBlock, hSessionToken, FALSE);
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.lpDesktop = L"WinSta0\\Default";
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi = { 0 };
+    BOOL ok = CreateProcessAsUserW(hSessionToken, NULL, cmdLine, NULL, NULL, FALSE,
+        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+        envBlock, NULL, &si, &pi);
+
+    if (ok) {
+        printf("[SessionMgr] Sunshine launched in session %lu (PID %lu), port 47990\n",
+               sessionId, pi.dwProcessId);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else {
+        printf("[SessionMgr] Failed to launch Sunshine: %lu\n", GetLastError());
+    }
+
+    if (envBlock) DestroyEnvironmentBlock(envBlock);
+    CloseHandle(hSessionToken);
+    return ok;
 }
 
 // ================================================================
