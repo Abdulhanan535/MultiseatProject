@@ -44,6 +44,15 @@ static HWND g_hWnd;
 static HWND g_Panels[4];   // one panel per tab
 static int  g_CurrentTab = 0;
 static HFONT g_hFont = NULL;
+static WNDPROC g_OrigPanelProc = NULL;
+
+// Subclass proc: STATIC panels swallow WM_COMMAND from child buttons.
+// We intercept and forward them to the main window.
+static LRESULT CALLBACK PanelSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COMMAND)
+        return SendMessageW(g_hWnd, msg, wp, lp);
+    return CallWindowProcW(g_OrigPanelProc, hwnd, msg, wp, lp);
+}
 
 // ── Forward declarations ─────────────────────────────────────────
 LRESULT CALLBACK WndProc(HWND,UINT,WPARAM,LPARAM);
@@ -312,6 +321,12 @@ static void CreateAllPanels(HWND hwnd)
         HWND hLV = MakeListView(p, IDC_LIST_GAMES, 0, y, pw, 280);
         LV_AddCol(hLV, 0, L"Game Executable",  400);
         LV_AddCol(hLV, 1, L"Status",           200);
+    }
+
+    // ---- Subclass panels to forward button clicks to main window ----
+    for (int i = 0; i < 4; i++) {
+        WNDPROC orig = (WNDPROC)SetWindowLongPtrW(g_Panels[i], GWLP_WNDPROC, (LONG_PTR)PanelSubclassProc);
+        if (!g_OrigPanelProc) g_OrigPanelProc = orig;
     }
 
     // ---- Status bar (proper control) ----
