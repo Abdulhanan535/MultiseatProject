@@ -110,6 +110,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SessionManager_Init();
         DeviceManager_Enumerate();
         DisplayManager_Enumerate();
+        DeviceManager_LoadConfig(L"C:\\ProgramData\\MultiseatProject\\config.json");
         RefreshDevices();
         RefreshMonitors();
         SetStatus(L"Ready. Assign devices and monitors, then click Start Seat 2.");
@@ -316,7 +317,7 @@ static void RefreshDevices(void) {
         ListView_InsertItem(hLV, &item);
         LV_SetText(hLV,(int)i,1, devs[i].IsKeyboard?L"Keyboard":L"Mouse");
         WCHAR s[16];
-        if (devs[i].SeatIndex==0xFF) wcscpy_s(s,16,L"—");
+        if (devs[i].SeatIndex==0xFF) wcscpy_s(s,16,L"Unassigned");
         else swprintf_s(s,16,L"Seat %lu",devs[i].SeatIndex+1);
         LV_SetText(hLV,(int)i,2,s);
         LV_SetText(hLV,(int)i,3,devs[i].InstanceId);
@@ -339,7 +340,7 @@ static void RefreshMonitors(void) {
         LV_SetText(hLV,(int)i,1,res);
         LV_SetText(hLV,(int)i,2,mons[i].IsPrimary?L"Yes":L"No");
         WCHAR s[16];
-        if (mons[i].SeatIndex==0xFF) wcscpy_s(s,16,L"—");
+        if (mons[i].SeatIndex==0xFF) wcscpy_s(s,16,L"Unassigned");
         else swprintf_s(s,16,L"Seat %lu",mons[i].SeatIndex+1);
         LV_SetText(hLV,(int)i,3,s);
     }
