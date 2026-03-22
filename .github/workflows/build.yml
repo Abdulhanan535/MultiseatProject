@@ -84,6 +84,27 @@ jobs:
 
     # ── 6. Build the kernel driver ───────────────────────────
     #  We use MSBuild with a minimal .vcxproj generated on the fly.
+    - name: Verify WDK installation
+      shell: powershell
+      run: |
+        $wdkRoot = "C:\Program Files (x86)\Windows Kits\10"
+        if (Test-Path $wdkRoot) {
+          Write-Host "WDK found at: $wdkRoot"
+          Get-ChildItem "$wdkRoot\Include" | Select-Object Name
+        } else {
+          Write-Error "WDK not found!"
+          exit 1
+        }
+        # Check WDK VS extension targets exist
+        $targetsPath = "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.Common.targets"
+        if (Test-Path $targetsPath) {
+          Write-Host "WDK VS targets found."
+        } else {
+          Write-Warning "WDK VS targets not found - driver build may fail"
+          # List what build targets are available
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\build\" -ErrorAction SilentlyContinue
+        }
+
     - name: Generate driver .vcxproj
       shell: powershell
       run: |
@@ -127,16 +148,30 @@ jobs:
         Write-Host "vcxproj generated"
 
     - name: Build kernel driver
-      shell: cmd
+      shell: powershell
       run: |
-        set WDKContentRoot=C:\Program Files (x86)\Windows Kits\10\
-        msbuild driver\multiseat_filter.vcxproj ^
+        # Find msbuild - it's part of VS2022 on the runner
+        $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+          -latest -requires Microsoft.Component.MSBuild `
+          -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+
+        if (-not $msbuild) {
+          # Fallback hardcoded path for VS2022 Enterprise on GitHub runners
+          $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+        }
+
+        Write-Host "Using MSBuild: $msbuild"
+
+        $env:WDKContentRoot = "C:\Program Files (x86)\Windows Kits\10\"
+
+        & $msbuild driver\multiseat_filter.vcxproj `
           /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
-        if %errorlevel% neq 0 (
-          echo Driver build failed - check WDK installation
-          exit /b %errorlevel%
-        )
-        echo kernel driver built OK
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Driver build failed"
+          exit $LASTEXITCODE
+        }
+        Write-Host "Kernel driver built OK"
 
     # ── 7. Test-sign the driver ──────────────────────────────
     - name: Create test certificate and sign driver
