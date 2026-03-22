@@ -372,7 +372,7 @@ BOOL NotifyDriverSeatSession(ULONG seatIndex, ULONG sessionId)
     SET_SEAT_SESSION_REQUEST req = { seatIndex, sessionId };
     DWORD br = 0;
     BOOL ok = DeviceIoControl(hDriver, IOCTL_MS_SET_SEAT_SESSION,
-                              &req, sizeof(req), NULL, 0, &br, NULL);
+                              &req, (DWORD)sizeof(req), NULL, 0, &br, NULL);
     CloseHandle(hDriver);
     return ok;
 }

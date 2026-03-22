@@ -95,7 +95,7 @@ BOOL DeviceManager_AssignToSeat(ULONG idx, ULONG seat)
     }
     DWORD br=0;
     BOOL ok = DeviceIoControl(hDrv, IOCTL_MS_ASSIGN_DEVICE,
-                              &req, sizeof(req), NULL, 0, &br, NULL);
+                              &req, (DWORD)sizeof(req), NULL, 0, &br, NULL);
     CloseHandle(hDrv);
     if (ok) d->SeatIndex = seat;
     return ok;

@@ -54,6 +54,7 @@ jobs:
           /link advapi32.lib wtsapi32.lib netapi32.lib ^
           setupapi.lib hid.lib userenv.lib shlwapi.lib ^
           ole32.lib oleaut32.lib wbemuuid.lib ^
+          user32.lib gdi32.lib ^
           /OUT:MultiseatSvc.exe /SUBSYSTEM:CONSOLE
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo service built OK
