@@ -37,6 +37,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef _countof
+#define _countof(a) (sizeof(a)/sizeof((a)[0]))
+#endif
 
 // ── MinHook or our own inline hook ──────────────────────────────
 // We implement a minimal x64 trampoline hook ourselves to avoid
@@ -222,8 +228,8 @@ static void InstallHooks(void)
     if (!hKernel) hKernel = GetModuleHandleW(L"kernelbase.dll");
 
 #define SETUP_HOOK(h, name, hookfn) \
-    (h).target = GetProcAddress(hKernel, name); \
-    (h).hook   = (LPVOID)(hookfn);               \
+    (h).target = (LPVOID)(UINT_PTR)GetProcAddress(hKernel, name); \
+    (h).hook   = (LPVOID)(UINT_PTR)(hookfn);                       \
     if ((h).target) HookInstall(&(h))
 
     SETUP_HOOK(g_HookCreateMutexW,    "CreateMutexW",    Hook_CreateMutexW);
