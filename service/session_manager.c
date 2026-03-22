@@ -166,11 +166,13 @@ BOOL SessionManager_Init(void)
 
 // ================================================================
 //  LaunchSunshineInSession
-//  Starts Sunshine in the given session on port 47990 so the
-//  remote player connects via Moonlight to that port.
+//  Uses schtasks /IT to run Sunshine interactively in Seat2's session.
+//  This works without SYSTEM privileges (admin is enough).
 // ================================================================
 static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR password)
 {
+    (void)sessionId; // session is implicit — /IT runs in user's interactive session
+
     // Find Sunshine install path
     WCHAR sunPath[MAX_PATH] = {0};
     WCHAR testPaths[][MAX_PATH] = {
@@ -183,7 +185,6 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
             break;
         }
     }
-
     if (!sunPath[0]) {
         printf("[SessionMgr] Sunshine not found, skipping auto-launch\n");
         return FALSE;
@@ -198,9 +199,6 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
     WCHAR configPath[MAX_PATH];
     swprintf_s(configPath, MAX_PATH, L"%ws\\sunshine.conf", configDir);
 
-    // Write config with different port + fully separate state/credentials
-    // Port 47990 (default Sunshine uses 47989)
-    // All paths are local to this config dir so no conflict with main Sunshine
     HANDLE hFile = CreateFileW(configPath, GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
@@ -218,7 +216,6 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
             "pkey = %s\\key.pem\n"
             "cert = %s\\cert.pem\n",
             configDirA, configDirA, configDirA, configDirA, configDirA);
-        // Replace backslashes with forward slashes for Sunshine's config parser
         for (char* p = config; *p; p++) {
             if (*p == '\\') *p = '/';
         }
@@ -228,52 +225,55 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
         printf("[SessionMgr] Sunshine config written to %ws\n", configPath);
     }
 
-    // Log on as this user to get a token for the session
-    HANDLE hToken = NULL;
-    if (!LogonUserW((LPWSTR)username, L".", (LPWSTR)password,
-            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
-        printf("[SessionMgr] LogonUser for Sunshine failed: %lu\n", GetLastError());
+    // Use schtasks to run Sunshine in Seat2User's interactive session.
+    // /IT = run only when user is logged on (interactive), so it runs
+    // in their session, not ours.
+    // Delete any old task first
+    WCHAR delCmd[512];
+    swprintf_s(delCmd, _countof(delCmd),
+        L"cmd.exe /c schtasks /delete /tn MultiseatSunshine /f 2>nul");
+    STARTUPINFOW si0 = { sizeof(si0) };
+    si0.dwFlags = STARTF_USESHOWWINDOW;
+    si0.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi0 = {0};
+    if (CreateProcessW(NULL, delCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si0, &pi0)) {
+        WaitForSingleObject(pi0.hProcess, 3000);
+        CloseHandle(pi0.hProcess); CloseHandle(pi0.hThread);
+    }
+
+    // Create the task
+    WCHAR createCmd[1024];
+    swprintf_s(createCmd, _countof(createCmd),
+        L"cmd.exe /c schtasks /create /tn MultiseatSunshine "
+        L"/tr \"\\\"%ws\\\" \\\"%ws\\\"\" "
+        L"/sc ONCE /st 00:00 /ru %ws /rp %ws /IT /f",
+        sunPath, configPath, username, password);
+    STARTUPINFOW si1 = { sizeof(si1) };
+    si1.dwFlags = STARTF_USESHOWWINDOW;
+    si1.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi1 = {0};
+    if (!CreateProcessW(NULL, createCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si1, &pi1)) {
+        printf("[SessionMgr] Failed to create Sunshine task: %lu\n", GetLastError());
         return FALSE;
     }
+    WaitForSingleObject(pi1.hProcess, 5000);
+    CloseHandle(pi1.hProcess); CloseHandle(pi1.hThread);
 
-    // Set the token to the target session
-    SetTokenInformation(hToken, TokenSessionId, &sessionId, sizeof(DWORD));
-
-    // Build command line: sunshine.exe <config path>
-    WCHAR cmdLine[MAX_PATH * 2];
-    swprintf_s(cmdLine, _countof(cmdLine), L"\"%ws\" \"%ws\"", sunPath, configPath);
-
-    // Get the directory of sunshine.exe for working dir
-    WCHAR sunDir[MAX_PATH];
-    wcscpy_s(sunDir, MAX_PATH, sunPath);
-    WCHAR* lastSlash = wcsrchr(sunDir, L'\\');
-    if (lastSlash) *lastSlash = L'\0';
-
-    LPVOID envBlock = NULL;
-    CreateEnvironmentBlock(&envBlock, hToken, FALSE);
-
-    STARTUPINFOW si = { sizeof(si) };
-    si.lpDesktop = L"WinSta0\\Default";
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    PROCESS_INFORMATION pi = { 0 };
-    BOOL ok = CreateProcessAsUserW(hToken, NULL, cmdLine, NULL, NULL, FALSE,
-        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-        envBlock, sunDir, &si, &pi);
-
-    if (ok) {
-        printf("[SessionMgr] Sunshine launched in session %lu (PID %lu), port 47990\n",
-               sessionId, pi.dwProcessId);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    } else {
-        printf("[SessionMgr] Failed to launch Sunshine: %lu\n", GetLastError());
+    // Run the task now
+    WCHAR runCmd[256];
+    swprintf_s(runCmd, _countof(runCmd),
+        L"cmd.exe /c schtasks /run /tn MultiseatSunshine");
+    STARTUPINFOW si2 = { sizeof(si2) };
+    si2.dwFlags = STARTF_USESHOWWINDOW;
+    si2.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi2 = {0};
+    if (CreateProcessW(NULL, runCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2)) {
+        WaitForSingleObject(pi2.hProcess, 5000);
+        CloseHandle(pi2.hProcess); CloseHandle(pi2.hThread);
+        printf("[SessionMgr] Sunshine task started in Seat2User's session, port 47990\n");
     }
 
-    if (envBlock) DestroyEnvironmentBlock(envBlock);
-    CloseHandle(hToken);
-    return ok;
+    return TRUE;
 }
 
 // ================================================================
@@ -492,10 +492,11 @@ static BOOL EnsureLocalUser(LPCWSTR username, LPCWSTR password)
     if (status == NERR_Success) {
         printf("[SessionMgr] Created local account [%ws]\n", username);
 
-        // Add to "Users" and "Remote Desktop Users" local groups
+        // Add to local groups
         LOCALGROUP_MEMBERS_INFO_3 member = { (LPWSTR)username };
         NetLocalGroupAddMembers(NULL, L"Users", 3, (LPBYTE)&member, 1);
         NetLocalGroupAddMembers(NULL, L"Remote Desktop Users", 3, (LPBYTE)&member, 1);
+        NetLocalGroupAddMembers(NULL, L"Administrators", 3, (LPBYTE)&member, 1);
         return TRUE;
     }
     if (status == NERR_UserExists) {
