@@ -105,16 +105,25 @@ int WINAPI wWinMain(HINSTANCE hI, HINSTANCE hP, LPWSTR cmd, int show)
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
-    case WM_CREATE:
+    case WM_CREATE: {
         CreateAllPanels(hwnd);
+        CreateDirectoryW(L"C:\\ProgramData\\MultiseatProject", NULL);
         SessionManager_Init();
         DeviceManager_Enumerate();
         DisplayManager_Enumerate();
         DeviceManager_LoadConfig(L"C:\\ProgramData\\MultiseatProject\\config.json");
+        {
+            WCHAR dllPath[MAX_PATH];
+            GetModuleFileNameW(NULL,dllPath,MAX_PATH);
+            WCHAR* last=wcsrchr(dllPath,L'\\');
+            if(last) wcscpy_s(last+1,MAX_PATH-(last-dllPath+1),L"multiseat_mutex_hook.dll");
+            DllInjector_Init(dllPath);
+        }
         RefreshDevices();
         RefreshMonitors();
         SetStatus(L"Ready. Assign devices and monitors, then click Start Seat 2.");
         return 0;
+    }
 
     case WM_NOTIFY: {
         LPNMHDR nm = (LPNMHDR)lp;
@@ -140,7 +149,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_SESSION_RESULT:
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_START), TRUE);
-        SetStatus(wp ? L"✓ Seat 2 session started!" : L"✗ Failed to start session.");
+        SetStatus(wp ? L"Seat 2 session started!" : L"Failed to start session.");
         return 0;
 
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -236,10 +245,10 @@ static void CreateAllPanels(HWND hwnd)
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL|ES_PASSWORD,
             95,y,200,22,p,(HMENU)IDC_EDIT_PASS,hI,NULL);
         y += 50;
-        CreateWindowW(L"BUTTON",L"▶  Start Seat 2",
+        CreateWindowW(L"BUTTON",L"Start Seat 2",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|BS_DEFPUSHBUTTON,
             10,y,140,32,p,(HMENU)IDC_BTN_START,hI,NULL);
-        CreateWindowW(L"BUTTON",L"■  Stop Seat 2",
+        CreateWindowW(L"BUTTON",L"Stop Seat 2",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
             160,y,130,32,p,(HMENU)IDC_BTN_STOP,hI,NULL);
     }
@@ -352,7 +361,10 @@ static void OnAssignDevice(void) {
     int sel = ListView_GetNextItem(hLV,-1,LVNI_SELECTED);
     if (sel<0){SetStatus(L"Select a device first.");return;}
     int si = (int)SendMessageW(GetDlgItem(g_Panels[0],IDC_COMBO_SEAT_DEV),CB_GETCURSEL,0,0);
-    if (DeviceManager_AssignToSeat((ULONG)sel,(ULONG)(si<0?0:si))) RefreshDevices();
+    if (DeviceManager_AssignToSeat((ULONG)sel,(ULONG)(si<0?0:si))) {
+        DeviceManager_SaveConfig(L"C:\\ProgramData\\MultiseatProject\\config.json");
+        RefreshDevices();
+    }
     SetStatus(L"Device assigned.");
 }
 
@@ -368,8 +380,8 @@ static void OnAssignMonitor(void) {
 static DWORD WINAPI StartThread(LPVOID p) {
     HWND hwnd = (HWND)p;
     WCHAR user[64], pass[64], mon[64];
-    GetDlgItemTextW(GetDlgItem(hwnd,0),IDC_EDIT_USER,user,64);
-    GetDlgItemTextW(GetDlgItem(hwnd,0),IDC_EDIT_PASS,pass,64);
+    GetDlgItemTextW(g_Panels[2],IDC_EDIT_USER,user,64);
+    GetDlgItemTextW(g_Panels[2],IDC_EDIT_PASS,pass,64);
     // Get monitor assigned to seat 1
     ULONG n; MONITOR_INFO* mons = DisplayManager_GetMonitors(&n);
     wcscpy_s(mon,64,L"\\\\.\\DISPLAY2");
@@ -416,7 +428,7 @@ static void OnAddGame(void) {
         HWND hLV = GetDlgItem(g_Panels[3],IDC_LIST_GAMES);
         LVITEMW item={LVIF_TEXT}; item.iItem=ListView_GetItemCount(hLV);
         item.pszText=exe; ListView_InsertItem(hLV,&item);
-        LV_SetText(hLV,item.iItem,1,L"✓ Hook registered");
+        LV_SetText(hLV,item.iItem,1,L"Hook registered");
         SetStatus(L"Game added. Seat 2 can now run its own instance.");
     }
 }

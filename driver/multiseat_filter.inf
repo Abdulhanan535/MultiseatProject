@@ -1,0 +1,70 @@
+; ================================================================
+;  MultiseatProject -- driver/multiseat_filter.inf
+;  HID upper-level filter driver INF for multiseat input routing
+; ================================================================
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %ProviderName%
+CatalogFile = multiseat_filter.cat
+DriverVer   = 03/22/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13  ; Driver Store
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+multiseat_filter.sys = 1
+
+; ── Manufacturer ──────────────────────────────────────────────────
+[Manufacturer]
+%ProviderName% = Models, NTamd64
+
+[Models.NTamd64]
+%FilterDesc% = Filter_Install, HID\Vid_*&Pid_*  ; Match all HID devices
+
+; ── Installation ──────────────────────────────────────────────────
+[Filter_Install]
+CopyFiles = Filter_CopyFiles
+
+[Filter_CopyFiles]
+multiseat_filter.sys
+
+[Filter_Install.HW]
+AddReg = Filter_AddReg
+
+[Filter_AddReg]
+HKR,,"UpperFilters",0x00010008,"multiseat_filter"
+
+; ── Service ───────────────────────────────────────────────────────
+[Filter_Install.Services]
+AddService = multiseat_filter, , Filter_Service
+; Keep the original HID minidriver service
+AddService = , %SPSVCINST_ASSOCSERVICE%
+
+[Filter_Service]
+DisplayName   = %ServiceName%
+ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
+StartType     = 3   ; SERVICE_DEMAND_START
+ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\multiseat_filter.sys
+
+; ── WDF section ───────────────────────────────────────────────────
+[Filter_Install.Wdf]
+KmdfService = multiseat_filter, Filter_WdfSection
+
+[Filter_WdfSection]
+KmdfLibraryVersion = 1.15
+
+; ── Strings ───────────────────────────────────────────────────────
+[Strings]
+ProviderName  = "MultiseatProject"
+FilterDesc    = "Multiseat HID Input Filter"
+ServiceName   = "multiseat_filter"
+DiskName      = "Multiseat Filter Driver Disk"
+SPSVCINST_ASSOCSERVICE = 0x00000002
