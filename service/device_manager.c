@@ -43,7 +43,7 @@ ULONG DeviceManager_Enumerate(void)
         if (!SetupDiGetDeviceInterfaceDetailW(hDI, &ifd, det, req, NULL, &did)) {
             free(det); continue;
         }
-        HANDLE h = CreateFileW(det->DevicePath, GENERIC_READ,
+        HANDLE h = CreateFileW(det->DevicePath, 0,
             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
         if (h == INVALID_HANDLE_VALUE) { free(det); continue; }
 

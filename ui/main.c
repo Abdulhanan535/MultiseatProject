@@ -87,7 +87,7 @@ int WINAPI wWinMain(HINSTANCE hI, HINSTANCE hP, LPWSTR cmd, int show)
     RegisterClassExW(&wc);
 
     g_hWnd = CreateWindowExW(0, L"MultiseatUI",
-        L"🖥 Multiseat Control Panel",
+        L"Multiseat Control Panel",
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 720, 520,
         NULL, NULL, hI, NULL);
@@ -164,7 +164,7 @@ static void CreateAllPanels(HWND hwnd)
     int W = 700, H = 430;
 
     // ── Tab control ──────────────────────────────────────────
-    HWND hTab = CreateWindowW(WC_TABCONTROL, NULL,
+    HWND hTab = CreateWindowW(WC_TABCONTROLW, NULL,
         WS_CHILD|WS_VISIBLE|TCS_FLATBUTTONS,
         5, 5, W, H, hwnd, (HMENU)IDC_TAB, hI, NULL);
 
@@ -291,7 +291,7 @@ static void ShowPanel(int idx) {
 
 // ── ListView helpers ─────────────────────────────────────────────
 static HWND MakeListView(HWND p, int id, int x, int y, int w, int h) {
-    HWND hLV = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL,
+    HWND hLV = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL,
         WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,
         x,y,w,h, p, (HMENU)(UINT_PTR)id,
         (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), NULL);

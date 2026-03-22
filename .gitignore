@@ -18,3 +18,9 @@ artifacts/
 
 # Temp
 *.tmp
+screenshot.ps1
+.gitignore
+sign_driver.ps1
+sign_catalog.ps1
+screen.png
+.gitignore
