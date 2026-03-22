@@ -183,17 +183,22 @@ BOOL SessionManager_CreateSeat(
     // ── 5. Set the token to the new session and launch userinit ──
     if (newSessionId != (DWORD)-1) {
         SetTokenInformation(hToken, TokenSessionId, &newSessionId, sizeof(DWORD));
-    }
-
-    if (!LaunchLogon(hToken, newSessionId)) {
-        printf("[SessionMgr] LaunchLogon failed\n");
-        CloseHandle(hToken);
-        return FALSE;
+        if (!LaunchLogon(hToken, newSessionId)) {
+            printf("[SessionMgr] LaunchLogon failed\n");
+            CloseHandle(hToken);
+            return FALSE;
+        }
+    } else {
+        MessageBoxW(NULL,
+            L"On Consumer Windows, automatic session creation is restricted.\n\n"
+            L"Please press Ctrl+Alt+Del, choose 'Switch User', and log in as the second user.\n"
+            L"We will wait for you to log in and automatically assign the monitor!",
+            L"Action Required", MB_ICONINFORMATION | MB_TOPMOST);
     }
     CloseHandle(hToken);
 
     // ── 6. Wait for the session to appear in the WTS list ────────
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 120; i++) {
         Sleep(500);
         ULONG sid = FindSessionByUser(username);
         if (sid != (ULONG)-1) {
