@@ -182,10 +182,22 @@ BOOL SessionManager_CreateSeat(
 
     // ── 5. Set the token to the new session and launch userinit ──
     if (newSessionId != (DWORD)-1) {
+        // WinStation API gave us a fresh session
         SetTokenInformation(hToken, TokenSessionId, &newSessionId, sizeof(DWORD));
+    } else {
+        // Consumer Windows fallback: use the active console session.
+        // The termsrv patch allows concurrent sessions. Setting the
+        // token to the console session and launching userinit will
+        // trigger Fast User Switching which creates a new session
+        // for the second user automatically.
+        DWORD consoleSid = WTSGetActiveConsoleSessionId();
+        printf("[SessionMgr] No WinStation API, using console session %lu\n", consoleSid);
+        if (consoleSid != 0xFFFFFFFF) {
+            SetTokenInformation(hToken, TokenSessionId, &consoleSid, sizeof(DWORD));
+        }
     }
 
-    if (!LaunchLogon(hToken, newSessionId != (DWORD)-1 ? newSessionId : 0)) {
+    if (!LaunchLogon(hToken, newSessionId)) {
         printf("[SessionMgr] LaunchLogon failed: %lu\n", GetLastError());
         CloseHandle(hToken);
         return FALSE;
