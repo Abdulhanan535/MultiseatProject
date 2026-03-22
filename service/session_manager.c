@@ -89,6 +89,7 @@ static ULONG FindSessionByUser(LPCWSTR username);
 static BOOL LaunchLogon(HANDLE hToken, DWORD sessionId);
 static BOOL EnableDebugPrivilege(void);
 static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR password);
+static void StopSunshineSeat2(void);
 
 // ── AppInit_DLLs for global mutex hook ───────────────────────────
 // Sets the hook DLL to load into every GUI process system-wide.
@@ -166,16 +167,93 @@ BOOL SessionManager_Init(void)
 
 // ================================================================
 //  LaunchSunshineInSession
-//  Uses schtasks /IT to run Sunshine interactively in Seat2's session.
-//  This works without SYSTEM privileges (admin is enough).
+//
+//  WHY NOT A SERVICE:
+//    The original approach registered a LocalSystem service for
+//    Seat 2.  That does NOT work for display capture because:
+//
+//    - Both the primary Sunshine and SunshineSeat2 would run as
+//      LocalSystem in Session 0.
+//    - Both call DXGI AcquireNextFrame on the same physical
+//      monitor (the only one Session 0 sees).
+//    - Whichever grabs the frame first wins; the other gets
+//      DXGI_ERROR_ACCESS_LOST and goes dark.
+//    - Result: only one streams at a time.
+//
+//  THE FIX — CreateProcessAsUser inside Session 2:
+//    When Sunshine runs as a process IN Session 2, DXGI shows
+//    it only the virtual display that belongs to that RDP
+//    session.  The primary Sunshine keeps the physical monitor;
+//    Seat 2's Sunshine captures the virtual RDP display.
+//    No conflict.  Both stream simultaneously.
+//
+//  Port separation:
+//    Sunshine derives all network ports from its "port" key
+//    (HTTPS web UI base).  Setting a different base shifts the
+//    entire port block, so both instances bind without collision.
+//
+//    Primary Sunshine (default install):
+//      47984  RTSP  |  47989 HTTP  |  47990 HTTPS  |  47998-48000 ctrl  |  48010 video
+//    Seat 2 Sunshine (shifted +110):
+//      48094  RTSP  |  48099 HTTP  |  48100 HTTPS  |  48108-48110 ctrl  |  48120 video
 // ================================================================
+
+// Port base for the Seat 2 Sunshine instance.
+// Moonlight should be pointed at this HTTPS port to reach Seat 2.
+#define SUNSHINE_SEAT2_PORT "48100"
+
+// Track the Sunshine process for Seat 2 so we can kill it on teardown.
+static HANDLE g_hSunshineSeat2 = NULL;
+
+static void StopSunshineSeat2(void)
+{
+    if (g_hSunshineSeat2) {
+        TerminateProcess(g_hSunshineSeat2, 0);
+        WaitForSingleObject(g_hSunshineSeat2, 3000);
+        CloseHandle(g_hSunshineSeat2);
+        g_hSunshineSeat2 = NULL;
+        printf("[SessionMgr] Sunshine Seat 2 process stopped\n");
+    }
+}
+
+// Detect the virtual display that the RDP/WinStation session uses.
+// RDP sessions get a "RDPDD" or "TERMDD" display driver. We enumerate
+// all display devices and return the one NOT present in the console
+// session — i.e. the virtual RDP display that was just created.
+static void FindSeat2DisplayName(WCHAR* outName, DWORD outLen)
+{
+    // Default: let Sunshine pick (it will see only its own session's display
+    // when running inside Session 2, so this is actually fine to leave empty).
+    outName[0] = L'\0';
+
+    DISPLAY_DEVICEW dd = { sizeof(dd) };
+    for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) {
+        // Skip mirrors and devices not attached to desktop
+        if (dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) continue;
+        if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) continue;
+
+        // The RDP virtual display adapter string contains "Remote" or "RDP"
+        WCHAR* name = dd.DeviceString;
+        if (wcsstr(name, L"Remote") || wcsstr(name, L"RDP") ||
+            wcsstr(name, L"RDPDD") || wcsstr(name, L"Indirect")) {
+            // dd.DeviceName is like "\\.\DISPLAY2"
+            wcsncpy_s(outName, outLen, dd.DeviceName, _TRUNCATE);
+            printf("[SessionMgr] Seat 2 virtual display: %ws (%ws)\n",
+                   dd.DeviceName, dd.DeviceString);
+            return;
+        }
+    }
+    // Nothing found — Sunshine will default to primary, which is fine
+    // because inside Session 2 the primary IS the virtual display.
+    printf("[SessionMgr] No explicit virtual display found; "
+           "Sunshine will use session default\n");
+}
+
 static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR password)
 {
-    (void)sessionId; // session is implicit — /IT runs in user's interactive session
-
-    // Find Sunshine install path
+    // ── 1. Find the Sunshine executable ─────────────────────────
     WCHAR sunPath[MAX_PATH] = {0};
-    WCHAR testPaths[][MAX_PATH] = {
+    const WCHAR* testPaths[] = {
         L"C:\\Program Files\\Sunshine\\sunshine.exe",
         L"C:\\Program Files (x86)\\Sunshine\\sunshine.exe",
     };
@@ -186,127 +264,136 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
         }
     }
     if (!sunPath[0]) {
-        printf("[SessionMgr] Sunshine not found, skipping auto-launch\n");
+        printf("[SessionMgr] Sunshine not found — skipping Seat 2 Sunshine\n");
         return FALSE;
     }
 
-    // Write a fully isolated config for Seat2
+    // ── 2. Write an isolated config for Seat 2 ──────────────────
     WCHAR configDir[MAX_PATH];
-    swprintf_s(configDir, MAX_PATH, L"C:\\ProgramData\\MultiseatProject\\sunshine_seat2");
+    swprintf_s(configDir, _countof(configDir),
+               L"C:\\ProgramData\\MultiseatProject\\sunshine_seat2");
     CreateDirectoryW(L"C:\\ProgramData\\MultiseatProject", NULL);
     CreateDirectoryW(configDir, NULL);
 
     WCHAR configPath[MAX_PATH];
-    swprintf_s(configPath, MAX_PATH, L"%ws\\sunshine.conf", configDir);
+    swprintf_s(configPath, _countof(configPath), L"%ws\\sunshine.conf", configDir);
+
+    // Detect the RDP virtual display so we can tell Sunshine exactly
+    // which output to capture.  If detection fails, leave it blank —
+    // Sunshine running inside Session 2 will automatically see only
+    // that session's display.
+    WCHAR displayName[64] = {0};
+    FindSeat2DisplayName(displayName, _countof(displayName));
 
     HANDLE hFile = CreateFileW(configPath, GENERIC_WRITE, 0, NULL,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         char configDirA[MAX_PATH];
-        WideCharToMultiByte(CP_UTF8, 0, configDir, -1, configDirA, MAX_PATH, NULL, NULL);
+        WideCharToMultiByte(CP_UTF8, 0, configDir, -1,
+                            configDirA, MAX_PATH, NULL, NULL);
+        for (char* p = configDirA; *p; p++) if (*p == '\\') *p = '/';
+
+        // Build optional output_name line
+        char outputLine[128] = "";
+        if (displayName[0]) {
+            char displayA[64];
+            WideCharToMultiByte(CP_UTF8, 0, displayName, -1,
+                                displayA, sizeof(displayA), NULL, NULL);
+            _snprintf_s(outputLine, sizeof(outputLine), _TRUNCATE,
+                        "output_name = %s\n", displayA);
+        }
+
         char config[2048];
         sprintf_s(config, sizeof(config),
-            "port = 47990\n"
+            // Port block — "port" is the HTTPS base; Sunshine derives all
+            // other ports from it automatically.
+            "port = " SUNSHINE_SEAT2_PORT "\n"
+            // Human-readable name shown in Moonlight's host list
             "sunshine_name = Seat2\n"
+            // Which display to capture.  When running inside Session 2
+            // this is usually redundant, but explicit is safer.
+            "%s"
             "min_log_level = info\n"
             "origin_web_ui_allowed = lan\n"
-            "credentials_file = %s\\credentials.json\n"
-            "file_state = %s\\state.json\n"
-            "log_path = %s\\sunshine.log\n"
-            "pkey = %s\\key.pem\n"
-            "cert = %s\\cert.pem\n",
+            // All state files are isolated from the primary Sunshine install
+            "credentials_file = %s/credentials.json\n"
+            "file_state = %s/state.json\n"
+            "log_path = %s/sunshine.log\n"
+            "pkey = %s/key.pem\n"
+            "cert = %s/cert.pem\n",
+            outputLine,
             configDirA, configDirA, configDirA, configDirA, configDirA);
-        for (char* p = config; *p; p++) {
-            if (*p == '\\') *p = '/';
-        }
+
         DWORD bw;
         WriteFile(hFile, config, (DWORD)strlen(config), &bw, NULL);
         CloseHandle(hFile);
-        printf("[SessionMgr] Sunshine config written to %ws\n", configPath);
+        printf("[SessionMgr] Sunshine Seat2 config written to %ws\n", configPath);
     }
 
-    // Find a process in the target session, duplicate its token, and use
-    // CreateProcessAsUser. The token is already in the right session so
-    // we don't need SeTcbPrivilege (just SeDebugPrivilege, which we have).
-    HANDLE hSessionToken = NULL;
-    PWTS_PROCESS_INFOW procs = NULL;
-    DWORD procCount = 0;
-
-    if (WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &procs, &procCount)) {
-        for (DWORD i = 0; i < procCount; i++) {
-            if (procs[i].SessionId != sessionId) continue;
-            if (procs[i].ProcessId == 0) continue;  // skip System Idle
-
-            HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, procs[i].ProcessId);
-            if (!hProc) continue;
-
-            HANDLE hTok = NULL;
-            if (OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY, &hTok)) {
-                HANDLE hDup = NULL;
-                if (DuplicateTokenEx(hTok, MAXIMUM_ALLOWED, NULL,
-                        SecurityImpersonation, TokenPrimary, &hDup)) {
-                    hSessionToken = hDup;
-                    CloseHandle(hTok);
-                    CloseHandle(hProc);
-                    break;
-                }
-                CloseHandle(hTok);
-            }
-            CloseHandle(hProc);
-        }
-        WTSFreeMemory(procs);
-    }
-
-    if (!hSessionToken) {
-        printf("[SessionMgr] Could not get token for session %lu\n", sessionId);
+    // ── 3. Log on as Seat2User to get a token for Session 2 ─────
+    //    We need a primary token whose session ID is Session 2 so
+    //    that CreateProcessAsUserW places the process there.
+    HANDLE hToken = NULL;
+    if (!LogonUserW((LPWSTR)username, L".", (LPWSTR)password,
+            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
+        printf("[SessionMgr] LogonUser for Sunshine failed: %lu\n", GetLastError());
         return FALSE;
     }
 
-    // Write a launcher batch file (avoids quoting hell)
-    WCHAR batPath[MAX_PATH];
-    swprintf_s(batPath, MAX_PATH, L"%ws\\launch_sunshine.bat", configDir);
-    HANDLE hBat = CreateFileW(batPath, GENERIC_WRITE, 0, NULL,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hBat != INVALID_HANDLE_VALUE) {
-        char batContent[1024];
-        char sunPathA[MAX_PATH], configPathA[MAX_PATH];
-        WideCharToMultiByte(CP_UTF8, 0, sunPath, -1, sunPathA, MAX_PATH, NULL, NULL);
-        WideCharToMultiByte(CP_UTF8, 0, configPath, -1, configPathA, MAX_PATH, NULL, NULL);
-        sprintf_s(batContent, sizeof(batContent),
-            "@echo off\r\n\"%s\" \"%s\"\r\n", sunPathA, configPathA);
-        DWORD bw;
-        WriteFile(hBat, batContent, (DWORD)strlen(batContent), &bw, NULL);
-        CloseHandle(hBat);
+    // Move the token into Session 2.
+    // NOTE: requires SeTcbPrivilege ("Act as part of the OS").
+    // EnableDebugPrivilege() should also acquire this — see that function.
+    if (!SetTokenInformation(hToken, TokenSessionId, &sessionId, sizeof(DWORD))) {
+        printf("[SessionMgr] SetTokenInformation(SessionId) failed: %lu\n"
+               "             Ensure SeTcbPrivilege is held.\n", GetLastError());
+        CloseHandle(hToken);
+        return FALSE;
     }
 
-    // Launch the bat in the target session
+    // ── 4. Build the command line ────────────────────────────────
     WCHAR cmdLine[MAX_PATH * 2];
-    swprintf_s(cmdLine, _countof(cmdLine), L"cmd.exe /c \"%ws\"", batPath);
+    swprintf_s(cmdLine, _countof(cmdLine),
+               L"\"%ws\" --config \"%ws\"", sunPath, configPath);
 
+    WCHAR sunDir[MAX_PATH];
+    wcscpy_s(sunDir, MAX_PATH, sunPath);
+    WCHAR* lastSlash = wcsrchr(sunDir, L'\\');
+    if (lastSlash) *lastSlash = L'\0';
+
+    // ── 5. Create an environment block for Seat2User ─────────────
     LPVOID envBlock = NULL;
-    CreateEnvironmentBlock(&envBlock, hSessionToken, FALSE);
+    CreateEnvironmentBlock(&envBlock, hToken, FALSE);
 
+    // ── 6. Launch Sunshine inside Session 2 ─────────────────────
+    //    lpDesktop MUST be NULL (or the session's own desktop name)
+    //    when launching into a different session.  Using the hardcoded
+    //    "WinSta0\Default" of the CONSOLE session is wrong and causes
+    //    the process to land in the wrong session's desktop.
     STARTUPINFOW si = { sizeof(si) };
-    si.lpDesktop = L"WinSta0\\Default";
-    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.lpDesktop   = NULL;   // inherit from session 2's default desktop
+    si.dwFlags     = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi = { 0 };
-    BOOL ok = CreateProcessAsUserW(hSessionToken, NULL, cmdLine, NULL, NULL, FALSE,
+    BOOL ok = CreateProcessAsUserW(
+        hToken, NULL, cmdLine, NULL, NULL, FALSE,
         CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-        envBlock, NULL, &si, &pi);
+        envBlock, sunDir, &si, &pi);
 
     if (ok) {
-        printf("[SessionMgr] Sunshine launched in session %lu (PID %lu), port 47990\n",
-               sessionId, pi.dwProcessId);
-        CloseHandle(pi.hProcess);
+        // Save the process handle so SessionManager_TerminateSeat can kill it
+        g_hSunshineSeat2 = pi.hProcess;
         CloseHandle(pi.hThread);
+        printf("[SessionMgr] Sunshine launched in Session %lu (PID %lu), "
+               "port " SUNSHINE_SEAT2_PORT "\n",
+               sessionId, pi.dwProcessId);
     } else {
-        printf("[SessionMgr] Failed to launch Sunshine: %lu\n", GetLastError());
+        printf("[SessionMgr] CreateProcessAsUser(Sunshine) failed: %lu\n",
+               GetLastError());
     }
 
     if (envBlock) DestroyEnvironmentBlock(envBlock);
-    CloseHandle(hSessionToken);
+    CloseHandle(hToken);
     return ok;
 }
 
@@ -381,8 +468,7 @@ BOOL SessionManager_CreateSeat(
         printf("[SessionMgr] Using RDP loopback for session creation\n");
         CloseHandle(hToken);  // done with this, RDP will handle logon
 
-        // Enable RDP and disable NLA (Network Level Authentication)
-        // NLA causes "The handle is invalid" with loopback + cmdkey credentials
+        // Enable RDP and allow local loopback without NLA
         HKEY hKey;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                 L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server",
@@ -392,15 +478,6 @@ BOOL SessionManager_CreateSeat(
             val = 0;
             RegSetValueExW(hKey, L"fSingleSessionPerUser", 0, REG_DWORD, (BYTE*)&val, 4);
             RegCloseKey(hKey);
-        }
-        // Disable NLA on RDP listener
-        HKEY hWinSta;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp",
-                0, KEY_SET_VALUE, &hWinSta) == ERROR_SUCCESS) {
-            DWORD val = 0;
-            RegSetValueExW(hWinSta, L"UserAuthentication", 0, REG_DWORD, (BYTE*)&val, 4);
-            RegCloseKey(hWinSta);
         }
 
         // Save credentials for silent login
@@ -424,7 +501,7 @@ BOOL SessionManager_CreateSeat(
             L"mstsc /v:127.0.0.2 /w:800 /h:600");
         STARTUPINFOW si2 = { sizeof(si2) };
         si2.dwFlags = STARTF_USESHOWWINDOW;
-        si2.wShowWindow = SW_SHOW;  // visible for testing
+        si2.wShowWindow = SW_MINIMIZE;
         PROCESS_INFORMATION pi2 = { 0 };
         if (!CreateProcessW(NULL, mstsc, NULL, NULL, FALSE,
                 0, NULL, NULL, &si2, &pi2)) {
@@ -448,9 +525,11 @@ BOOL SessionManager_CreateSeat(
         }
     }
 
-    // DEBUG: Don't kill mstsc for now (testing)
+    // Kill mstsc now that the session is established (session stays alive)
     if (hMstsc) {
+        TerminateProcess(hMstsc, 0);
         CloseHandle(hMstsc);
+        printf("[SessionMgr] mstsc terminated (session persists)\n");
     }
 
     if (newSessionId == (DWORD)-1) {
@@ -465,7 +544,9 @@ BOOL SessionManager_CreateSeat(
     // ── 7. Enable global mutex hook for all apps in Seat 2 ────────
     EnableGlobalMutexHook();
 
-    // ── 8. Launch Sunshine in the new session on port 47990 ──────
+    // ── 8. Launch Sunshine inside Session 2 ─────────────────────
+    //    Pass username+password so we can build a correctly
+    //    session-scoped token (requires SeTcbPrivilege).
     LaunchSunshineInSession(newSessionId, username, password);
 
     printf("[SessionMgr] Seat %lu ready -> session %lu\n",
@@ -494,6 +575,9 @@ BOOL SessionManager_TerminateSeat(ULONG seatIndex)
 
     if (pfnDisconnect) pfnDisconnect(WTS_CURRENT_SERVER_HANDLE, sid, FALSE);
     WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, sid, FALSE);
+
+    // Kill the Sunshine process that was launched inside this seat's session.
+    if (seatIndex != 0) StopSunshineSeat2();
 
     DisableGlobalMutexHook();
 
@@ -534,11 +618,10 @@ static BOOL EnsureLocalUser(LPCWSTR username, LPCWSTR password)
     if (status == NERR_Success) {
         printf("[SessionMgr] Created local account [%ws]\n", username);
 
-        // Add to local groups
+        // Add to "Users" and "Remote Desktop Users" local groups
         LOCALGROUP_MEMBERS_INFO_3 member = { (LPWSTR)username };
         NetLocalGroupAddMembers(NULL, L"Users", 3, (LPBYTE)&member, 1);
         NetLocalGroupAddMembers(NULL, L"Remote Desktop Users", 3, (LPBYTE)&member, 1);
-        NetLocalGroupAddMembers(NULL, L"Administrators", 3, (LPBYTE)&member, 1);
         return TRUE;
     }
     if (status == NERR_UserExists) {
@@ -664,12 +747,23 @@ static BOOL EnableDebugPrivilege(void)
                           TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
         return FALSE;
 
-    TOKEN_PRIVILEGES tp;
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &tp.Privileges[0].Luid);
+    // SeDebugPrivilege  — needed to open svchost for the termsrv patch
+    // SeTcbPrivilege    — needed for SetTokenInformation(TokenSessionId)
+    //                     when moving a token into a different session
+    const WCHAR* privs[] = { L"SeDebugPrivilege", L"SeTcbPrivilege" };
+    BOOL allOk = TRUE;
 
-    BOOL ok = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+    for (int i = 0; i < 2; i++) {
+        TOKEN_PRIVILEGES tp;
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (!LookupPrivilegeValueW(NULL, privs[i], &tp.Privileges[0].Luid)) {
+            allOk = FALSE; continue;
+        }
+        if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL))
+            allOk = FALSE;
+    }
+
     CloseHandle(hToken);
-    return ok;
+    return allOk;
 }

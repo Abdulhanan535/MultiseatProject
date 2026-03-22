@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-2022
 
     steps:
-    # ── 1. Checkout code ─────────────────────────────────────
+    # ── 1. Checkout ───────────────────────────────────────────
     - name: Checkout
       uses: actions/checkout@v4
 
@@ -21,12 +21,29 @@ jobs:
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd service\mutex_hook
-        cl /LD /W4 /O2 /nologo /D UNICODE /D _UNICODE mutex_hook.c ^
-           /link /DLL /OUT:multiseat_mutex_hook.dll kernel32.lib
+        cl /LD /W4 /O2 /nologo /D UNICODE /D _UNICODE ^
+           mutex_hook.c ^
+           /link /DLL /OUT:multiseat_mutex_hook.dll ^
+           kernel32.lib
         if %errorlevel% neq 0 exit /b %errorlevel%
-        echo mutex hook DLL built OK
+        echo [OK] multiseat_mutex_hook.dll
 
-    # ── 3. Build the control panel EXE (single exe, no service)
+    # ── 3. Build the control panel EXE ───────────────────────
+    #
+    #  Source files:
+    #    ui\main.c                   - GUI / entry point
+    #    service\session_manager.c   - seat creation, WinStation, RDP loopback
+    #    service\termsrv_patch.c     - in-memory termsrv.dll patch
+    #    service\dll_injector.c      - IFEO setup + CreateRemoteThread injection
+    #                                  (was missing from the original build)
+    #
+    #  Libraries added vs original build.yml:
+    #    winsta.lib    - WinStationCreateDynamic, WinStationConnectW, etc.
+    #    ole32.lib     - CoInitializeEx / CoCreateInstance (dll_injector WMI)
+    #    oleaut32.lib  - BSTR helpers (dll_injector WMI)
+    #    wbemuuid.lib  - CLSID_WbemLocator, IID_IWbemLocator (dll_injector WMI)
+    #    shlwapi.lib   - PathXxx helpers (session_manager)
+    #
     - name: Build control panel
       shell: cmd
       run: |
@@ -36,25 +53,29 @@ jobs:
           main.c ^
           ..\service\session_manager.c ^
           ..\service\termsrv_patch.c ^
+          ..\service\dll_injector.c ^
           /I ..\service ^
-          /link user32.lib gdi32.lib comctl32.lib advapi32.lib ^
-          wtsapi32.lib netapi32.lib userenv.lib ^
+          /link ^
+            user32.lib gdi32.lib comctl32.lib ^
+            advapi32.lib wtsapi32.lib netapi32.lib userenv.lib ^
+            winsta.lib shlwapi.lib ^
+            ole32.lib oleaut32.lib wbemuuid.lib ^
           /OUT:MultiseatCtrlPanel.exe /SUBSYSTEM:WINDOWS
         if %errorlevel% neq 0 exit /b %errorlevel%
-        echo control panel built OK
+        echo [OK] MultiseatCtrlPanel.exe
 
     # ── 4. Collect outputs ───────────────────────────────────
-    - name: Collect build artifacts
+    - name: Collect artifacts
       shell: powershell
       run: |
-        New-Item -ItemType Directory -Force -Path "artifacts"
-        Copy-Item "ui\MultiseatCtrlPanel.exe"                   "artifacts\" -ErrorAction SilentlyContinue
-        Copy-Item "service\mutex_hook\multiseat_mutex_hook.dll" "artifacts\" -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+        Copy-Item "ui\MultiseatCtrlPanel.exe"                   "artifacts\" -ErrorAction Stop
+        Copy-Item "service\mutex_hook\multiseat_mutex_hook.dll" "artifacts\" -ErrorAction Stop
         Copy-Item "README.md"                                   "artifacts\" -ErrorAction SilentlyContinue
         Write-Host "--- Artifacts ---"
-        Get-ChildItem "artifacts"
+        Get-ChildItem "artifacts" | Format-Table Name, Length
 
-    # ── 5. Upload as downloadable artifact ──────────────────
+    # ── 5. Upload ────────────────────────────────────────────
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:

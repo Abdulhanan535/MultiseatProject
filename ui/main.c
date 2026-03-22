@@ -90,7 +90,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_SESSION_RESULT:
         EnableWindow(GetDlgItem(g_hWnd, IDC_BTN_START), TRUE);
-        SetStatus(wp ? L"Seat 2 started! Friend connects via Moonlight to port 47990."
+        SetStatus(wp ? L"Seat 2 started! Friend connects via Moonlight to port 48100."
                      : L"Failed to start session. Check credentials and try again.");
         return 0;
 
@@ -165,7 +165,7 @@ static void CreateControls(HWND hwnd)
         L"How it works:\n"
         L"1. Click 'Start Seat 2' — creates account + session automatically\n"
         L"2. Your friend opens Moonlight on their PC\n"
-        L"3. Connects to this PC's IP, port 47990\n"
+        L"3. Connects to this PC's IP, port 48100\n"
         L"4. They get a full Windows desktop as Seat2User\n\n"
         L"All apps are automatically isolated between sessions.\n"
         L"Games with Global mutexes are handled automatically.",
