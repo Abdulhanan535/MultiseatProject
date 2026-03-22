@@ -43,6 +43,7 @@
 static HWND g_hWnd;
 static HWND g_Panels[4];   // one panel per tab
 static int  g_CurrentTab = 0;
+static HFONT g_hFont = NULL;
 
 // ── Forward declarations ─────────────────────────────────────────
 LRESULT CALLBACK WndProc(HWND,UINT,WPARAM,LPARAM);
@@ -89,7 +90,7 @@ int WINAPI wWinMain(HINSTANCE hI, HINSTANCE hP, LPWSTR cmd, int show)
     g_hWnd = CreateWindowExW(0, L"MultiseatUI",
         L"Multiseat Control Panel",
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 720, 520,
+        CW_USEDEFAULT, CW_USEDEFAULT, 800, 560,
         NULL, NULL, hI, NULL);
     ShowWindow(g_hWnd, show);
     UpdateWindow(g_hWnd);
@@ -160,15 +161,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // ================================================================
 //  CreateAllPanels
 // ================================================================
+static void ApplyFont(HWND hwnd);
+static BOOL CALLBACK ApplyFontToChild(HWND hwnd, LPARAM lp) {
+    SendMessageW(hwnd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    return TRUE;
+}
+
 static void CreateAllPanels(HWND hwnd)
 {
     HINSTANCE hI = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
-    int W = 700, H = 430;
+    int W = 780, H = 470;
 
-    // ── Tab control ──────────────────────────────────────────
+    // Create the UI font (Segoe UI, the Windows 11 system font)
+    g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+    // ---- Tab control ----
     HWND hTab = CreateWindowW(WC_TABCONTROLW, NULL,
-        WS_CHILD|WS_VISIBLE|TCS_FLATBUTTONS,
-        5, 5, W, H, hwnd, (HMENU)IDC_TAB, hI, NULL);
+        WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,
+        8, 8, W, H, hwnd, (HMENU)IDC_TAB, hI, NULL);
+    SendMessageW(hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
     TCITEMW ti = { TCIF_TEXT };
     ti.pszText = (LPWSTR)L"  Devices  ";  TabCtrl_InsertItem(hTab, 0, &ti);
@@ -176,112 +189,139 @@ static void CreateAllPanels(HWND hwnd)
     ti.pszText = (LPWSTR)L"  Account  ";  TabCtrl_InsertItem(hTab, 2, &ti);
     ti.pszText = (LPWSTR)L"  Games  ";    TabCtrl_InsertItem(hTab, 3, &ti);
 
-    // Panel rect (inside tab)
-    int px=10, py=34, pw=682, ph=380;
+    // Panel rect (inside tab with padding)
+    int px=16, py=38, pw=750, ph=420;
 
-    // ── Panel 0: Devices ─────────────────────────────────────
+    // ==== Panel 0: Devices ====
     g_Panels[0] = CreateWindowW(L"STATIC", NULL,
         WS_CHILD|WS_VISIBLE, px, py, pw, ph, hwnd, NULL, hI, NULL);
     {
         HWND p = g_Panels[0];
-        HWND hLV = MakeListView(p, IDC_LIST_DEV, 0, 0, pw, 270);
-        LV_AddCol(hLV, 0, L"Device Description", 340);
-        LV_AddCol(hLV, 1, L"Type",   80);
-        LV_AddCol(hLV, 2, L"Seat",   80);
-        LV_AddCol(hLV, 3, L"ID",     160);
+        HWND hLV = MakeListView(p, IDC_LIST_DEV, 0, 0, pw, 310);
+        LV_AddCol(hLV, 0, L"Device Description", 300);
+        LV_AddCol(hLV, 1, L"Type",    80);
+        LV_AddCol(hLV, 2, L"Seat",    90);
+        LV_AddCol(hLV, 3, L"Instance ID", 260);
 
-        CreateWindowW(L"STATIC",L"Assign selected →",WS_CHILD|WS_VISIBLE,
-            0,278,120,22,p,NULL,hI,NULL);
-        HWND hC = CreateWindowW(L"COMBOBOX",NULL,
+        // Action row
+        int ay = 320;
+        CreateWindowW(L"STATIC", L"Assign to:",
+            WS_CHILD|WS_VISIBLE|SS_CENTERIMAGE, 0, ay+2, 70, 24, p, NULL, hI, NULL);
+        HWND hC = CreateWindowW(L"COMBOBOX", NULL,
             WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST,
-            124,276,90,100,p,(HMENU)IDC_COMBO_SEAT_DEV,hI,NULL);
+            74, ay, 100, 100, p, (HMENU)IDC_COMBO_SEAT_DEV, hI, NULL);
         FillSeatCombo(hC, 0);
-
-        CreateWindowW(L"BUTTON",L"Assign",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            220,275,70,24,p,(HMENU)IDC_BTN_ASSIGN_DEV,hI,NULL);
-        CreateWindowW(L"BUTTON",L"Refresh",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            300,275,70,24,p,(HMENU)IDC_BTN_REFRESH,hI,NULL);
+        CreateWindowW(L"BUTTON", L"Assign",
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            184, ay, 80, 26, p, (HMENU)IDC_BTN_ASSIGN_DEV, hI, NULL);
+        CreateWindowW(L"BUTTON", L"Refresh All",
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            274, ay, 90, 26, p, (HMENU)IDC_BTN_REFRESH, hI, NULL);
     }
 
-    // ── Panel 1: Monitors ────────────────────────────────────
-    g_Panels[1] = CreateWindowW(L"STATIC",NULL,
+    // ==== Panel 1: Monitors ====
+    g_Panels[1] = CreateWindowW(L"STATIC", NULL,
         WS_CHILD, px, py, pw, ph, hwnd, NULL, hI, NULL);
     {
         HWND p = g_Panels[1];
-        HWND hLV = MakeListView(p, IDC_LIST_MON, 0, 0, pw, 270);
-        LV_AddCol(hLV, 0, L"Device Name",  200);
-        LV_AddCol(hLV, 1, L"Resolution",   120);
-        LV_AddCol(hLV, 2, L"Primary",       70);
-        LV_AddCol(hLV, 3, L"Seat",          70);
+        HWND hLV = MakeListView(p, IDC_LIST_MON, 0, 0, pw, 310);
+        LV_AddCol(hLV, 0, L"Display",     220);
+        LV_AddCol(hLV, 1, L"Resolution",  130);
+        LV_AddCol(hLV, 2, L"Primary",      80);
+        LV_AddCol(hLV, 3, L"Seat",         90);
 
-        CreateWindowW(L"STATIC",L"Assign selected →",WS_CHILD|WS_VISIBLE,
-            0,278,120,22,p,NULL,hI,NULL);
-        HWND hC = CreateWindowW(L"COMBOBOX",NULL,
+        int ay = 320;
+        CreateWindowW(L"STATIC", L"Assign to:",
+            WS_CHILD|WS_VISIBLE|SS_CENTERIMAGE, 0, ay+2, 70, 24, p, NULL, hI, NULL);
+        HWND hC = CreateWindowW(L"COMBOBOX", NULL,
             WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST,
-            124,276,90,100,p,(HMENU)IDC_COMBO_SEAT_MON,hI,NULL);
+            74, ay, 100, 100, p, (HMENU)IDC_COMBO_SEAT_MON, hI, NULL);
         FillSeatCombo(hC, 1);
-        CreateWindowW(L"BUTTON",L"Assign",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            220,275,70,24,p,(HMENU)IDC_BTN_ASSIGN_MON,hI,NULL);
+        CreateWindowW(L"BUTTON", L"Assign",
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            184, ay, 80, 26, p, (HMENU)IDC_BTN_ASSIGN_MON, hI, NULL);
     }
 
-    // ── Panel 2: Account ─────────────────────────────────────
-    g_Panels[2] = CreateWindowW(L"STATIC",NULL,
+    // ==== Panel 2: Account ====
+    g_Panels[2] = CreateWindowW(L"STATIC", NULL,
         WS_CHILD, px, py, pw, ph, hwnd, NULL, hI, NULL);
     {
         HWND p = g_Panels[2];
-        int y = 20;
+        int y = 10;
+
+        // Description group
+        CreateWindowW(L"BUTTON", L" Seat 2 User Account ",
+            WS_CHILD|WS_VISIBLE|BS_GROUPBOX,
+            0, y, 400, 180, p, NULL, hI, NULL);
+
+        y += 28;
         CreateWindowW(L"STATIC",
-            L"A separate Windows user account is created for Seat 2.\n"
+            L"A separate Windows account is created for Seat 2.\n"
             L"It gets its own desktop, saves, and game session.",
-            WS_CHILD|WS_VISIBLE, 10,y, 500, 40, p, NULL, hI, NULL);
-        y += 60;
-        CreateWindowW(L"STATIC",L"Username:",WS_CHILD|WS_VISIBLE,10,y,80,22,p,NULL,hI,NULL);
-        CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"Seat2User",
-            WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            95,y,200,22,p,(HMENU)IDC_EDIT_USER,hI,NULL);
-        y += 34;
-        CreateWindowW(L"STATIC",L"Password:",WS_CHILD|WS_VISIBLE,10,y,80,22,p,NULL,hI,NULL);
-        CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",NULL,
-            WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL|ES_PASSWORD,
-            95,y,200,22,p,(HMENU)IDC_EDIT_PASS,hI,NULL);
+            WS_CHILD|WS_VISIBLE, 16, y, 370, 38, p, NULL, hI, NULL);
+
         y += 50;
-        CreateWindowW(L"BUTTON",L"Start Seat 2",
+        CreateWindowW(L"STATIC", L"Username:",
+            WS_CHILD|WS_VISIBLE|SS_CENTERIMAGE, 16, y, 75, 24, p, NULL, hI, NULL);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"Seat2User",
+            WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
+            95, y, 220, 24, p, (HMENU)IDC_EDIT_USER, hI, NULL);
+
+        y += 36;
+        CreateWindowW(L"STATIC", L"Password:",
+            WS_CHILD|WS_VISIBLE|SS_CENTERIMAGE, 16, y, 75, 24, p, NULL, hI, NULL);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL,
+            WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL|ES_PASSWORD,
+            95, y, 220, 24, p, (HMENU)IDC_EDIT_PASS, hI, NULL);
+
+        // Buttons below group
+        y = 200;
+        CreateWindowW(L"BUTTON", L"Start Seat 2",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|BS_DEFPUSHBUTTON,
-            10,y,140,32,p,(HMENU)IDC_BTN_START,hI,NULL);
-        CreateWindowW(L"BUTTON",L"Stop Seat 2",
+            0, y, 130, 32, p, (HMENU)IDC_BTN_START, hI, NULL);
+        CreateWindowW(L"BUTTON", L"Stop Seat 2",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            160,y,130,32,p,(HMENU)IDC_BTN_STOP,hI,NULL);
+            140, y, 130, 32, p, (HMENU)IDC_BTN_STOP, hI, NULL);
     }
 
-    // ── Panel 3: Games ───────────────────────────────────────
-    g_Panels[3] = CreateWindowW(L"STATIC",NULL,
+    // ==== Panel 3: Games ====
+    g_Panels[3] = CreateWindowW(L"STATIC", NULL,
         WS_CHILD, px, py, pw, ph, hwnd, NULL, hI, NULL);
     {
         HWND p = g_Panels[3];
         int y = 10;
-        CreateWindowW(L"STATIC",
-            L"Register game EXEs so Seat 2 can run its own instance.\n"
-            L"This adds them to the mutex-hook IFEO list.",
-            WS_CHILD|WS_VISIBLE, 10,y,560,36, p,NULL,hI,NULL);
-        y += 44;
-        CreateWindowW(L"STATIC",L"Game EXE name:",WS_CHILD|WS_VISIBLE,10,y,110,22,p,NULL,hI,NULL);
-        CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"GameName.exe",
+
+        CreateWindowW(L"BUTTON", L" Register Games ",
+            WS_CHILD|WS_VISIBLE|BS_GROUPBOX,
+            0, y, pw, 70, p, NULL, hI, NULL);
+
+        y += 24;
+        CreateWindowW(L"STATIC", L"EXE name:",
+            WS_CHILD|WS_VISIBLE|SS_CENTERIMAGE, 14, y, 70, 24, p, NULL, hI, NULL);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            125,y,260,22,p,(HMENU)IDC_EDIT_GAME_EXE,hI,NULL);
-        CreateWindowW(L"BUTTON",L"Add",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            392,y,60,22,p,(HMENU)IDC_BTN_ADD_GAME,hI,NULL);
-        CreateWindowW(L"BUTTON",L"Remove",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            458,y,70,22,p,(HMENU)IDC_BTN_REMOVE_GAME,hI,NULL);
-        y += 34;
-        HWND hLV = MakeListView(p, IDC_LIST_GAMES, 0, y, pw, 220);
-        LV_AddCol(hLV, 0, L"Game Executable", 300);
-        LV_AddCol(hLV, 1, L"Status",          150);
+            88, y, 300, 24, p, (HMENU)IDC_EDIT_GAME_EXE, hI, NULL);
+        CreateWindowW(L"BUTTON", L"Add",
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            396, y, 70, 26, p, (HMENU)IDC_BTN_ADD_GAME, hI, NULL);
+        CreateWindowW(L"BUTTON", L"Remove",
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            474, y, 80, 26, p, (HMENU)IDC_BTN_REMOVE_GAME, hI, NULL);
+
+        y = 90;
+        HWND hLV = MakeListView(p, IDC_LIST_GAMES, 0, y, pw, 280);
+        LV_AddCol(hLV, 0, L"Game Executable",  400);
+        LV_AddCol(hLV, 1, L"Status",           200);
     }
 
-    // ── Status bar ───────────────────────────────────────────
-    CreateWindowExW(WS_EX_CLIENTEDGE,L"STATIC",L"",
-        WS_CHILD|WS_VISIBLE|SS_LEFT,
-        5, H+10, W, 22, hwnd, (HMENU)IDC_STATUS, hI, NULL);
+    // ---- Status bar (proper control) ----
+    HWND hStatus = CreateWindowW(STATUSCLASSNAMEW, L"",
+        WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP,
+        0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, hI, NULL);
+    SendMessageW(hStatus, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+    // Apply font to all child controls
+    EnumChildWindows(hwnd, ApplyFontToChild, 0);
 
     ShowPanel(0);
 }
@@ -291,13 +331,13 @@ static void ShowPanel(int idx) {
         ShowWindow(g_Panels[i], (i == idx) ? SW_SHOW : SW_HIDE);
 }
 
-// ── ListView helpers ─────────────────────────────────────────────
+// ---- ListView helpers ----
 static HWND MakeListView(HWND p, int id, int x, int y, int w, int h) {
     HWND hLV = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL,
         WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,
         x,y,w,h, p, (HMENU)(UINT_PTR)id,
         (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), NULL);
-    ListView_SetExtendedListViewStyle(hLV, LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES);
+    ListView_SetExtendedListViewStyle(hLV, LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES|LVS_EX_DOUBLEBUFFER);
     return hLV;
 }
 static void LV_AddCol(HWND hLV, int col, LPCWSTR title, int width) {
