@@ -235,16 +235,27 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
         printf("[SessionMgr] Sunshine config written to %ws\n", configPath);
     }
 
-    // Log on as this user to get a token for the session
+    // Wait for the session desktop to fully initialize
+    printf("[SessionMgr] Waiting for session %lu desktop to initialize...\n", sessionId);
+    Sleep(8000);
+
+    // Get the REAL session token (not a fresh LogonUser token)
+    // WTSQueryUserToken gives us the interactive token for the session
     HANDLE hToken = NULL;
-    if (!LogonUserW((LPWSTR)username, L".", (LPWSTR)password,
-            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
-        printf("[SessionMgr] LogonUser for Sunshine failed: %lu\n", GetLastError());
+    if (!WTSQueryUserToken(sessionId, &hToken)) {
+        printf("[SessionMgr] WTSQueryUserToken failed: %lu\n", GetLastError());
         return FALSE;
     }
 
-    // Set the token to the target session
-    SetTokenInformation(hToken, TokenSessionId, &sessionId, sizeof(DWORD));
+    // Duplicate as a primary token for CreateProcessAsUser
+    HANDLE hPrimaryToken = NULL;
+    DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL,
+        SecurityImpersonation, TokenPrimary, &hPrimaryToken);
+    CloseHandle(hToken);
+    if (!hPrimaryToken) {
+        printf("[SessionMgr] DuplicateTokenEx failed: %lu\n", GetLastError());
+        return FALSE;
+    }
 
     // Build command line: sunshine.exe <config path>
     WCHAR cmdLine[MAX_PATH * 2];
@@ -257,16 +268,14 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
     if (lastSlash) *lastSlash = L'\0';
 
     LPVOID envBlock = NULL;
-    CreateEnvironmentBlock(&envBlock, hToken, FALSE);
+    CreateEnvironmentBlock(&envBlock, hPrimaryToken, FALSE);
 
     STARTUPINFOW si = { sizeof(si) };
     si.lpDesktop = L"WinSta0\\Default";
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi = { 0 };
-    BOOL ok = CreateProcessAsUserW(hToken, NULL, cmdLine, NULL, NULL, FALSE,
-        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+    BOOL ok = CreateProcessAsUserW(hPrimaryToken, NULL, cmdLine, NULL, NULL, FALSE,
+        CREATE_UNICODE_ENVIRONMENT,
         envBlock, sunDir, &si, &pi);
 
     if (ok) {
@@ -274,12 +283,19 @@ static BOOL LaunchSunshineInSession(DWORD sessionId, LPCWSTR username, LPCWSTR p
                sessionId, pi.dwProcessId);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+
+        // Disconnect the RDP session so the virtual display adapter takes over.
+        // The session stays alive, but Sunshine can now use its own display
+        // driver instead of the RDP virtual display (which causes black screen).
+        Sleep(3000);
+        WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, sessionId, FALSE);
+        printf("[SessionMgr] RDP session %lu disconnected (Sunshine VDD takes over)\n", sessionId);
     } else {
         printf("[SessionMgr] Failed to launch Sunshine: %lu\n", GetLastError());
     }
 
     if (envBlock) DestroyEnvironmentBlock(envBlock);
-    CloseHandle(hToken);
+    CloseHandle(hPrimaryToken);
     return ok;
 }
 
