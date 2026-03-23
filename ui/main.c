@@ -182,12 +182,19 @@ static void CreateControls(HWND hwnd)
 
 // ── Sunshine detection ───────────────────────────────────────────
 static BOOL DetectSunshine(WCHAR* pathOut, DWORD pathLen) {
-    WCHAR testPaths[][MAX_PATH] = {
+    WCHAR localSun[MAX_PATH];
+    GetModuleFileNameW(NULL, localSun, MAX_PATH);
+    WCHAR* lastSlash = wcsrchr(localSun, L'\\');
+    if (lastSlash) wcscpy_s(lastSlash + 1, MAX_PATH - (lastSlash - localSun + 1), L"Sunshine\\sunshine.exe");
+    else localSun[0] = 0;
+
+    LPCWSTR testPaths[] = {
+        localSun,
         L"C:\\Program Files\\Sunshine\\sunshine.exe",
         L"C:\\Program Files (x86)\\Sunshine\\sunshine.exe",
     };
-    for (int i = 0; i < 2; i++) {
-        if (GetFileAttributesW(testPaths[i]) != INVALID_FILE_ATTRIBUTES) {
+    for (int i = 0; i < 3; i++) {
+        if (testPaths[i][0] && GetFileAttributesW(testPaths[i]) != INVALID_FILE_ATTRIBUTES) {
             wcscpy_s(pathOut, pathLen, testPaths[i]);
             return TRUE;
         }
